@@ -7,6 +7,7 @@ mod engine;
 mod error;
 pub mod format;
 pub mod keydir;
+mod merge;
 mod recovery;
 
 // The actual public API: everything a consumer of this crate (e.g.

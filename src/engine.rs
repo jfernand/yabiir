@@ -1,11 +1,11 @@
 //! The single-writer engine tying [`crate::keydir`] and [`crate::datafile`]
 //! together: `put`/`get`/`delete`, implementing the [`Bitcask`] trait. See
 //! `docs/bitcask-implementation-plan.md` §4. `open` recovers the keydir
-//! from any existing data/hint files via [`crate::recovery`] (plan §6).
+//! from any existing data/hint files via [`crate::recovery`] (plan §6);
+//! [`Engine::merge`] compacts non-active files via [`crate::merge`] (plan
+//! §7).
 //!
 //! Not implemented yet, deliberately out of scope for this milestone:
-//! - **Merge** (plan §7): [`Engine::merge`] returns
-//!   [`crate::error::Error::NotImplemented`].
 //! - **Locking** (plan §8.1): nothing stops two `read_write` handles from
 //!   being opened on the same directory concurrently yet.
 
@@ -19,6 +19,7 @@ use crate::datafile::{ActiveFile, DataFileSet};
 use crate::error::{Error, Result};
 use crate::format;
 use crate::keydir::{Keydir, KeydirEntry, SharedKeydir};
+use crate::merge;
 use crate::recovery;
 
 /// Concrete single-process Bitcask engine. See the module docs above for
@@ -82,6 +83,25 @@ impl Engine {
         Ok(self
             .files
             .read_at(entry.file_id, entry.value_pos, entry.value_sz)?)
+    }
+
+    /// Test-only entry point into [`merge::merge_with_hook`], exposed here
+    /// because it needs direct access to this struct's private fields —
+    /// `merge.rs` can't reach them from outside this module. Lets tests
+    /// deterministically pause merge right before it repoints a specific
+    /// key's keydir entry, to exercise the plan §7.3 race without relying
+    /// on timing.
+    #[cfg(test)]
+    fn merge_with_hook(&self, hook: impl FnMut(&[u8])) -> Result<()> {
+        merge::merge_with_hook(
+            &self.dir,
+            &self.keydir,
+            &self.files,
+            &self.active,
+            &self.next_file_id,
+            self.opts.max_file_size,
+            hook,
+        )
     }
 }
 
@@ -175,7 +195,14 @@ impl Bitcask for Engine {
     }
 
     fn merge(&self) -> Result<()> {
-        Err(Error::NotImplemented("merge (plan §7)"))
+        merge::merge(
+            &self.dir,
+            &self.keydir,
+            &self.files,
+            &self.active,
+            &self.next_file_id,
+            self.opts.max_file_size,
+        )
     }
 
     fn sync(&self) -> Result<()> {
@@ -388,13 +415,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_is_not_implemented_yet() {
-        let dir = TempDir::new();
-        let db = open(&dir);
-        assert!(matches!(db.merge(), Err(Error::NotImplemented(_))));
-    }
-
-    #[test]
     fn reopen_recovers_previously_written_keys() {
         let dir = TempDir::new();
         {
@@ -433,5 +453,51 @@ mod tests {
                 Some(format!("v{i}").into_bytes())
             );
         }
+    }
+
+    /// Plan §7.5's "race: concurrent put during merge wins" — deterministic
+    /// version, via `merge_with_hook` rather than timing. Merge is paused
+    /// right before it would repoint "K"'s keydir entry to its merged
+    /// location; a `put("K", "new")` happens on another thread while
+    /// paused; merge is then allowed to finish. The CAS-repoint must lose
+    /// to the concurrent write, not silently resurrect the value merge was
+    /// copying forward (see `merge.rs`'s §7.3 discussion).
+    #[test]
+    fn race_concurrent_put_during_merge_does_not_lose_the_write() {
+        let dir = TempDir::new();
+        let db = std::sync::Arc::new(
+            Engine::open(
+                &*dir,
+                Options {
+                    max_file_size: 1, // every put rotates into its own file
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+        db.put(b"K", b"old").unwrap(); // lands in its own already-rotated-out file
+
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel::<()>();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+
+        let merger_db = std::sync::Arc::clone(&db);
+        let merger = std::thread::spawn(move || {
+            merger_db
+                .merge_with_hook(move |key| {
+                    if key == b"K" {
+                        paused_tx.send(()).unwrap();
+                        resume_rx.recv().unwrap();
+                    }
+                })
+                .unwrap();
+        });
+
+        paused_rx.recv().unwrap(); // merge has copied K forward, about to repoint
+        db.put(b"K", b"new").unwrap(); // race: overwrite K while merge is paused
+        resume_tx.send(()).unwrap(); // let merge's (now-stale) CAS attempt run
+
+        merger.join().unwrap();
+
+        assert_eq!(db.get(b"K").unwrap(), Some(b"new".to_vec()));
     }
 }

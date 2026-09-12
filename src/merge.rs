@@ -1,0 +1,531 @@
+//! Merge (compaction): copy forward only the live entries from every
+//! non-active data file into a fresh, smaller set of data files (each with
+//! an accompanying hint file), then remove the old files. See
+//! `docs/bitcask-implementation-plan.md` §7.
+
+use std::fs::{self, File};
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::datafile::{ActiveFile, DataFileSet};
+use crate::error::Result;
+use crate::format::{self, Entry, EntryRead};
+use crate::keydir::{KeydirEntry, SharedKeydir};
+
+/// Compact every non-active data file in `dir`. Safe to call concurrently
+/// with ongoing `put`/`get`/`delete` against the same keydir/active file —
+/// a key written concurrently with the merge is never lost (see the
+/// CAS-repoint discussion below).
+///
+/// `active` and `next_file_id` are the engine's own fields, passed through
+/// rather than accessed via `&Engine`, since `Engine`'s fields are private
+/// to `engine.rs` — this keeps merge's logic in its own module while still
+/// sharing the *same* active-file lock and file-id counter the engine's
+/// write path uses, which is what makes merge-output file ids never
+/// collide with concurrently-rotated active files.
+pub fn merge(
+    dir: &Path,
+    keydir: &SharedKeydir,
+    files: &DataFileSet,
+    active: &RwLock<ActiveFile>,
+    next_file_id: &AtomicU32,
+    max_file_size: u64,
+) -> Result<()> {
+    merge_with_hook(dir, keydir, files, active, next_file_id, max_file_size, |_| {})
+}
+
+/// Same as [`merge`], plus a hook invoked for every live entry right after
+/// it's been copied into the merge output but *before* the keydir
+/// compare-and-swap repoint — the exact race window plan §7.3 describes.
+/// `merge` itself is just this with a no-op hook; tests use this directly
+/// (via `Engine`'s `#[cfg(test)]` forwarding method) to deterministically
+/// pause merge mid-repoint and inject a concurrent write, rather than
+/// relying on timing.
+pub(crate) fn merge_with_hook(
+    dir: &Path,
+    keydir: &SharedKeydir,
+    files: &DataFileSet,
+    active: &RwLock<ActiveFile>,
+    next_file_id: &AtomicU32,
+    max_file_size: u64,
+    mut before_repoint: impl FnMut(&[u8]),
+) -> Result<()> {
+    // 1. Snapshot which files are eligible: everything except the current
+    //    active file at the moment merge starts. Files created by rotation
+    //    *during* the merge (concurrent puts are still allowed) are simply
+    //    not included in this pass — they'll be picked up by the next
+    //    merge. Safe and simple (plan §7.2 step 1).
+    let active_id_at_start = active.read().unwrap().file_id();
+    let input_ids: Vec<u32> = DataFileSet::discover(dir)?
+        .into_iter()
+        .filter(|&id| id < active_id_at_start)
+        .collect();
+    if input_ids.is_empty() {
+        return Ok(()); // nothing to do
+    }
+
+    // 2. Iterate input files oldest -> newest, entry by entry, copying
+    //    forward only the live ones.
+    let mut out = MergeOutputWriter::new(dir, next_file_id, max_file_size)?;
+    for &file_id in &input_ids {
+        let data_path = DataFileSet::data_path(dir, file_id);
+        for (offset, entry) in read_all_entries(&data_path)? {
+            if entry.header.tombstone {
+                continue; // dead by definition — never "live"
+            }
+            let entry_value_pos = offset + format::HEADER_SIZE as u64 + entry.header.ksz as u64;
+            let is_live = keydir
+                .get(&entry.key)
+                .is_some_and(|kd| kd.file_id == file_id && kd.value_pos == entry_value_pos);
+            if !is_live {
+                continue;
+            }
+
+            let (new_file_id, new_value_pos) = out.write_live_entry(&entry)?;
+            before_repoint(&entry.key);
+
+            // 3. Repoint the keydir ONLY IF it still points at the exact
+            //    (file_id, offset) we just copied — if a concurrent put()
+            //    already overwrote this key while we were mid-merge, our
+            //    copy is now stale and must NOT clobber the newer entry
+            //    (plan §7.3).
+            let old = KeydirEntry {
+                file_id,
+                value_sz: entry.header.value_sz,
+                value_pos: entry_value_pos,
+                tstamp: entry.header.tstamp,
+            };
+            let new = KeydirEntry {
+                file_id: new_file_id,
+                value_sz: entry.header.value_sz,
+                value_pos: new_value_pos,
+                tstamp: entry.header.tstamp,
+            };
+            // Ignore a `false` return: it means a racing put already won,
+            // which is correct — our stale copy stays orphaned in the new
+            // file, never pointed to, and gets cleaned up by the *next*
+            // merge pass.
+            keydir.cas_repoint(&entry.key, old, new);
+        }
+    }
+    out.finish()?;
+
+    // 4. Remove the old input files now that nothing in the keydir points
+    //    at them anymore: every key that was live in them now points at
+    //    `out`'s files (or was already repointed elsewhere by a race);
+    //    every key that wasn't live was already pointing elsewhere and
+    //    still does.
+    for &file_id in &input_ids {
+        let _ = fs::remove_file(DataFileSet::data_path(dir, file_id));
+        let _ = fs::remove_file(DataFileSet::hint_path(dir, file_id));
+        files.forget(file_id);
+    }
+
+    Ok(())
+}
+
+/// Sequentially scan `path` (an already-closed, immutable data file — never
+/// the active file) into `(offset, Entry)` pairs, tombstones included.
+/// Unlike recovery's scan, every input file here is expected to be
+/// complete, so a truncated entry is always a warning (there's no "this is
+/// the last, still-active file" exemption the way there is during
+/// recovery).
+fn read_all_entries(path: &Path) -> io::Result<Vec<(u64, Entry)>> {
+    let mut f = File::open(path)?;
+    let mut out = Vec::new();
+    let mut pos: u64 = 0;
+    loop {
+        match format::read_entry(&mut f)? {
+            None => break,
+            Some(EntryRead::Truncated) => {
+                eprintln!(
+                    "warning: {} has a truncated entry at offset {pos} during merge — \
+                     unexpected for an already-closed file, possible corruption",
+                    path.display()
+                );
+                break;
+            }
+            Some(EntryRead::Ok(entry, total_len)) => {
+                out.push((pos, entry));
+                pos += total_len;
+            }
+            Some(EntryRead::CrcMismatch { total_len }) => {
+                eprintln!(
+                    "warning: {} has a corrupt entry at offset {pos} (CRC mismatch) \
+                     during merge, skipping it",
+                    path.display()
+                );
+                pos += total_len;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Writes merge output: a data file plus its companion hint file, rotating
+/// to `output_id, output_id+1, ...` on the same `max_file_size` threshold
+/// normal active files use. Reuses `ActiveFile` for the data-file side;
+/// doesn't touch the keydir itself — `merge` handles keydir updates
+/// per-entry (plan §7.4).
+struct MergeOutputWriter<'a> {
+    dir: &'a Path,
+    next_file_id: &'a AtomicU32,
+    max_file_size: u64,
+    current_data: ActiveFile,
+    current_hint: BufWriter<File>,
+}
+
+impl<'a> MergeOutputWriter<'a> {
+    fn new(dir: &'a Path, next_file_id: &'a AtomicU32, max_file_size: u64) -> io::Result<Self> {
+        let (current_data, current_hint) = Self::open_output(dir, next_file_id)?;
+        Ok(Self {
+            dir,
+            next_file_id,
+            max_file_size,
+            current_data,
+            current_hint,
+        })
+    }
+
+    fn open_output(dir: &Path, next_file_id: &AtomicU32) -> io::Result<(ActiveFile, BufWriter<File>)> {
+        // Claims an id from the *same* counter the engine's write path uses
+        // for active-file rotation, so merge-output ids never collide with
+        // a concurrently-rotated active file.
+        let file_id = next_file_id.fetch_add(1, Ordering::SeqCst);
+        let data = ActiveFile::create(dir, file_id)?;
+        let hint = BufWriter::new(File::create(DataFileSet::hint_path(dir, file_id))?);
+        Ok((data, hint))
+    }
+
+    fn write_live_entry(&mut self, entry: &Entry) -> io::Result<(u32, u64)> {
+        let encoded = format::encode_entry(&entry.key, &entry.value, false, entry.header.tstamp);
+        let (file_id, value_pos, _total_len) = self.current_data.append(&encoded)?;
+        let hint = format::encode_hint(&entry.key, &entry.header, value_pos);
+        self.current_hint.write_all(hint.as_bytes())?;
+        if self.current_data.len() >= self.max_file_size {
+            self.rotate()?;
+        }
+        Ok((file_id, value_pos))
+    }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        self.current_data.sync()?;
+        self.current_hint.flush()?;
+        let (data, hint) = Self::open_output(self.dir, self.next_file_id)?;
+        self.current_data = data;
+        self.current_hint = hint;
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.current_data.sync()?;
+        self.current_hint.flush()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Bitcask, Engine, Options};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    /// Minimal self-cleaning temp directory — same pattern used throughout
+    /// this crate's tests.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "yabiir-merge-test-{}-{}-{}",
+                std::process::id(),
+                n,
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Raw scan of every data file currently in `dir` for how many entries
+    /// (live or tombstone) exist anywhere for `key` — used to check that
+    /// merge actually removed superseded/dead bytes from disk, not just
+    /// that the keydir looks right.
+    fn count_entries_for_key(dir: &Path, key: &[u8]) -> usize {
+        let mut count = 0;
+        for file_id in DataFileSet::discover(dir).unwrap() {
+            let path = DataFileSet::data_path(dir, file_id);
+            for (_, entry) in read_all_entries(&path).unwrap() {
+                if entry.key == key {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn basic_compaction_keeps_only_latest_version() {
+        let dir = TempDir::new();
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 1, // every put rotates into its own file
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        db.put(b"A", b"v1").unwrap();
+        db.put(b"A", b"v2").unwrap();
+        db.put(b"A", b"v3").unwrap();
+
+        let before_ids = DataFileSet::discover(&dir).unwrap();
+        assert!(
+            before_ids.len() >= 4,
+            "expected 3 rotated files + 1 active, got {before_ids:?}"
+        );
+
+        db.merge().unwrap();
+
+        assert_eq!(db.get(b"A").unwrap(), Some(b"v3".to_vec()));
+        assert_eq!(count_entries_for_key(&dir, b"A"), 1); // only the latest version survives anywhere on disk
+
+        let after_ids = DataFileSet::discover(&dir).unwrap();
+        for &id in &before_ids[..before_ids.len() - 1] {
+            assert!(!after_ids.contains(&id), "old file {id} should have been removed");
+        }
+        let new_ids: Vec<u32> = after_ids
+            .iter()
+            .copied()
+            .filter(|id| !before_ids.contains(id))
+            .collect();
+        assert!(!new_ids.is_empty(), "expected at least one new merge-output file");
+        for &id in &new_ids {
+            assert!(
+                DataFileSet::hint_path(&dir, id).exists(),
+                "merge output file {id} missing its hint file"
+            );
+        }
+    }
+
+    #[test]
+    fn tombstone_reclamation() {
+        let dir = TempDir::new();
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 1,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        db.put(b"B", b"v").unwrap();
+        db.delete(b"B").unwrap();
+
+        db.merge().unwrap();
+
+        assert_eq!(db.get(b"B").unwrap(), None);
+        assert_eq!(count_entries_for_key(&dir, b"B"), 0); // no trace, live or tombstone
+    }
+
+    #[test]
+    fn merge_does_not_touch_the_active_file() {
+        let dir = TempDir::new();
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 40,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        for i in 0..30u32 {
+            db.put(format!("k{i}").as_bytes(), format!("v{i}").as_bytes())
+                .unwrap();
+        }
+
+        let before_ids = DataFileSet::discover(&dir).unwrap();
+        assert!(
+            before_ids.len() > 2,
+            "test needs multiple rotated files, got {before_ids:?}"
+        );
+        let active_id = *before_ids.last().unwrap();
+        let an_old_id = before_ids[0];
+
+        db.merge().unwrap();
+
+        let after_ids = DataFileSet::discover(&dir).unwrap();
+        assert!(after_ids.contains(&active_id), "active file must survive merge untouched");
+        assert!(!after_ids.contains(&an_old_id), "an old rotated file should have been merged away");
+
+        for i in 0..30u32 {
+            assert_eq!(
+                db.get(format!("k{i}").as_bytes()).unwrap(),
+                Some(format!("v{i}").into_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn hint_files_match_full_scan_recovery_post_merge() {
+        let dir = TempDir::new();
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 1,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        db.put(b"a", b"1").unwrap();
+        db.put(b"a", b"2").unwrap();
+        db.put(b"b", b"3").unwrap();
+        db.delete(b"b").unwrap();
+        db.put(b"c", b"4").unwrap();
+        db.merge().unwrap();
+        db.sync().unwrap();
+
+        let mut expected_keys = db.list_keys().unwrap();
+        expected_keys.sort();
+
+        // A fresh, independent open — the keydir is rebuilt purely by
+        // recovery, hint-based here since merge just wrote hint files.
+        let reopened = Engine::open(&*dir, Options::default()).unwrap();
+        let mut got_keys = reopened.list_keys().unwrap();
+        got_keys.sort();
+        assert_eq!(got_keys, expected_keys);
+        for key in &got_keys {
+            assert_eq!(reopened.get(key).unwrap(), db.get(key).unwrap());
+        }
+    }
+
+    #[test]
+    fn repeated_merges_are_idempotent() {
+        let dir = TempDir::new();
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 1,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        db.put(b"a", b"1").unwrap();
+        db.put(b"a", b"2").unwrap();
+        db.put(b"b", b"3").unwrap();
+
+        db.merge().unwrap();
+        assert_eq!(db.get(b"a").unwrap(), Some(b"2".to_vec()));
+        assert_eq!(db.get(b"b").unwrap(), Some(b"3".to_vec()));
+
+        db.merge().unwrap(); // merging an already-merged, unchanged datastore again
+        assert_eq!(db.get(b"a").unwrap(), Some(b"2".to_vec()));
+        assert_eq!(db.get(b"b").unwrap(), Some(b"3".to_vec()));
+    }
+
+    /// Plan §7.5's stress test: one thread merging in a loop while several
+    /// others concurrently put/delete/get on a small, overlapping keyspace,
+    /// with every put/delete mirrored (under one shared lock, so the
+    /// comparison at the end is valid) into a plain `HashMap` reference
+    /// model; the real engine's final state must match it exactly.
+    #[test]
+    fn stress_concurrent_put_delete_and_merge_match_reference_model() {
+        let dir = TempDir::new();
+        let db = Arc::new(
+            Engine::open(
+                &*dir,
+                Options {
+                    max_file_size: 256,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+        let reference = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
+        let keys: Vec<Vec<u8>> = (0..8u32).map(|i| format!("k{i}").into_bytes()).collect();
+        let deadline = Instant::now() + Duration::from_millis(500);
+
+        let merger = {
+            let db = Arc::clone(&db);
+            std::thread::spawn(move || {
+                while Instant::now() < deadline {
+                    db.merge().unwrap();
+                }
+            })
+        };
+
+        let workers: Vec<_> = (0..4u64)
+            .map(|worker_id| {
+                let db = Arc::clone(&db);
+                let reference = Arc::clone(&reference);
+                let keys = keys.clone();
+                std::thread::spawn(move || {
+                    // Small xorshift-style PRNG — avoids pulling in a `rand`
+                    // dependency just for test-input shuffling.
+                    let mut state = 0x9E3779B97F4A7C15u64.wrapping_add(worker_id);
+                    while Instant::now() < deadline {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let key = &keys[(state as usize) % keys.len()];
+                        let op = (state >> 32) % 3;
+                        // Hold the reference lock across both the real
+                        // mutation and the model update, so the two never
+                        // drift apart and the final comparison is valid.
+                        let mut reference = reference.lock().unwrap();
+                        match op {
+                            0 => {
+                                let value = format!("v{state}").into_bytes();
+                                db.put(key, &value).unwrap();
+                                reference.insert(key.clone(), value);
+                            }
+                            1 => {
+                                db.delete(key).unwrap();
+                                reference.remove(key.as_slice());
+                            }
+                            _ => {
+                                db.get(key).unwrap(); // extra concurrent read pressure
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for w in workers {
+            w.join().unwrap();
+        }
+        merger.join().unwrap();
+
+        let reference = reference.lock().unwrap();
+        for key in &keys {
+            assert_eq!(
+                db.get(key).unwrap(),
+                reference.get(key.as_slice()).cloned(),
+                "mismatch for {:?}",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+}
+

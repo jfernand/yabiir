@@ -7,4 +7,5 @@ restart
 /perf.data
 /perf.data.old
 /flamegraph.svg
+/perf-report.txt
 /*.csv

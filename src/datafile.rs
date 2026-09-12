@@ -62,9 +62,18 @@ impl ActiveFile {
     /// entry_total_len)` — `value_pos` is where the *value* bytes start
     /// within the file (past the header and key), which is exactly what
     /// the keydir stores and what reads seek/pread from directly.
+    ///
+    /// Flushes the `BufWriter` before returning (a `write` syscall, not a
+    /// fsync) — necessary, not just an optimization detail: `read_at` reads
+    /// through a *separate* raw file handle that bypasses this buffer, so
+    /// without flushing here, a `read_at` for bytes still sitting in
+    /// userspace would see a short/stale file and fail. `sync` (fsync) is
+    /// still a separate, more expensive durability step, gated by
+    /// `Options::sync_on_put` at the engine level.
     pub fn append(&mut self, encoded: &EncodedEntry) -> io::Result<(u32, u64, u64)> {
         let bytes = encoded.as_bytes();
         self.writer.write_all(bytes)?;
+        self.writer.flush()?;
         let total_len = bytes.len() as u64;
         let value_pos = self.offset + (total_len - encoded.value_len() as u64);
         self.offset += total_len;

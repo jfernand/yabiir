@@ -1,6 +1,8 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use yabiir::{Bitcask, Engine, Options};
 
 /// Bitcask CLI: point it at a datastore directory and issue one command.
 #[derive(Parser)]
@@ -25,42 +27,53 @@ enum Command {
     List,
 }
 
-fn main() {
+fn main() -> ExitCode {
     let args = Args::parse();
-
-    // The `Bitcask` engine (src/api.rs) has no concrete implementation yet
-    // (see docs/bitcask-implementation-plan.md, milestones 2+) — only the
-    // trait and on-disk format exist so far. Wire these arms up to
-    // `<impl Bitcask>::open(&args.dir, Options::default())` followed by the
-    // matching trait method once that lands.
-    match args.command {
-        Command::Add { key, value } => {
-            eprintln!(
-                "add {key:?}={value:?} in {}: engine not implemented yet",
-                args.dir
-                    .display()
-            );
-        }
-        Command::Get { key } => {
-            eprintln!(
-                "get {key:?} in {}: engine not implemented yet",
-                args.dir
-                    .display()
-            );
-        }
-        Command::Rm { key } => {
-            eprintln!(
-                "rm {key:?} in {}: engine not implemented yet",
-                args.dir
-                    .display()
-            );
-        }
-        Command::List => {
-            eprintln!(
-                "list in {}: engine not implemented yet",
-                args.dir
-                    .display()
-            );
+    match run(args) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::FAILURE
         }
     }
+}
+
+/// Each invocation of this CLI is a fresh process: it opens the datastore,
+/// does exactly one operation, and exits. Recovery
+/// (`docs/bitcask-implementation-plan.md` §6) isn't implemented yet, so a
+/// directory that already has data on disk from a *previous* invocation
+/// starts this one with an empty keydir — an `add` followed by a separate
+/// `get` invocation won't find the key until recovery lands.
+fn run(args: Args) -> yabiir::Result<ExitCode> {
+    let db = Engine::open(&args.dir, Options::default())?;
+
+    let code = match args.command {
+        Command::Add { key, value } => {
+            db.put(key.as_bytes(), value.as_bytes())?;
+            ExitCode::SUCCESS
+        }
+        Command::Get { key } => match db.get(key.as_bytes())? {
+            Some(value) => {
+                println!("{}", String::from_utf8_lossy(&value));
+                ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!("key not found");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Rm { key } => {
+            db.delete(key.as_bytes())?;
+            ExitCode::SUCCESS
+        }
+        Command::List => {
+            for key in db.list_keys()? {
+                println!("{}", String::from_utf8_lossy(&key));
+            }
+            ExitCode::SUCCESS
+        }
+    };
+
+    db.close()?;
+    Ok(code)
 }

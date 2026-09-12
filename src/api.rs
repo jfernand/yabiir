@@ -6,7 +6,7 @@ use crate::error::Result;
 ///
 /// See `docs/bitcask-implementation-plan.md` §9 for the rationale behind
 /// each field.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Options {
     /// Open for reading and writing (`true`) or read-only (`false`).
     /// Only one `read_write` handle may be open on a given directory at a

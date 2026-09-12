@@ -37,25 +37,29 @@ fn main() {
         Command::Add { key, value } => {
             eprintln!(
                 "add {key:?}={value:?} in {}: engine not implemented yet",
-                args.dir.display()
+                args.dir
+                    .display()
             );
         }
         Command::Get { key } => {
             eprintln!(
                 "get {key:?} in {}: engine not implemented yet",
-                args.dir.display()
+                args.dir
+                    .display()
             );
         }
         Command::Rm { key } => {
             eprintln!(
                 "rm {key:?} in {}: engine not implemented yet",
-                args.dir.display()
+                args.dir
+                    .display()
             );
         }
         Command::List => {
             eprintln!(
                 "list in {}: engine not implemented yet",
-                args.dir.display()
+                args.dir
+                    .display()
             );
         }
     }

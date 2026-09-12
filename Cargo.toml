@@ -29,6 +29,10 @@ harness = false
 name = "datafile"
 harness = false
 
+[[bench]]
+name = "merge"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

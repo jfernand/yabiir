@@ -16,6 +16,10 @@ pub enum Error {
     /// A mutating call (`put`/`delete`/`merge`/`sync`) was made on a handle
     /// opened with `read_write: false`.
     ReadOnly,
+    /// The call names a real, planned part of the design
+    /// (`docs/bitcask-implementation-plan.md`) that this milestone's
+    /// implementation doesn't provide yet — e.g. `merge` before §7 lands.
+    NotImplemented(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -28,6 +32,7 @@ impl fmt::Display for Error {
             Error::EmptyKey => write!(f, "key must not be empty"),
             Error::Corrupt(msg) => write!(f, "data file corrupt: {msg}"),
             Error::ReadOnly => write!(f, "datastore is not open for writing (read-only handle)"),
+            Error::NotImplemented(what) => write!(f, "not implemented yet: {what}"),
         }
     }
 }

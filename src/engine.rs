@@ -1,14 +1,9 @@
 //! The single-writer engine tying [`crate::keydir`] and [`crate::datafile`]
 //! together: `put`/`get`/`delete`, implementing the [`Bitcask`] trait. See
-//! `docs/bitcask-implementation-plan.md` §4.
+//! `docs/bitcask-implementation-plan.md` §4. `open` recovers the keydir
+//! from any existing data/hint files via [`crate::recovery`] (plan §6).
 //!
 //! Not implemented yet, deliberately out of scope for this milestone:
-//! - **Recovery** (plan §6): `open` does not scan existing data/hint files
-//!   to rebuild the keydir. Reopening a directory that already has data in
-//!   it starts with an *empty* keydir — previously-written keys become
-//!   invisible to `get`/`list_keys`/`fold` until §6 lands, even though
-//!   their bytes are still safely on disk (new writes simply continue
-//!   appending after them; nothing is truncated or overwritten).
 //! - **Merge** (plan §7): [`Engine::merge`] returns
 //!   [`crate::error::Error::NotImplemented`].
 //! - **Locking** (plan §8.1): nothing stops two `read_write` handles from
@@ -24,6 +19,7 @@ use crate::datafile::{ActiveFile, DataFileSet};
 use crate::error::{Error, Result};
 use crate::format;
 use crate::keydir::{Keydir, KeydirEntry, SharedKeydir};
+use crate::recovery;
 
 /// Concrete single-process Bitcask engine. See the module docs above for
 /// what's implemented so far.
@@ -94,21 +90,22 @@ impl Bitcask for Engine {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
 
-        // No recovery yet (see module docs) — the keydir starts empty
-        // regardless of what's already in the directory. We still compute
-        // the correct starting file_id from whatever's on disk (plan
-        // §3.4's "next_file_id ... initialized at open() time to
-        // max(existing file_ids) + 1"), so a reopened directory's new
-        // writes land in a fresh file after any existing ones rather than
-        // silently resuming file_id 0 every time.
-        let existing = DataFileSet::discover(&dir)?;
-        let next_id = existing.last().map_or(0, |id| id + 1);
+        let file_ids = DataFileSet::discover(&dir)?;
+        let mut keydir = Keydir::new();
+        recovery::recover(&dir, &file_ids, &mut keydir)?;
+
+        // next_file_id starts above whatever's already on disk (plan
+        // §3.4/§6.4) — closed files are never reopened for writing, even
+        // if the process crashed while one was still active: it's scanned
+        // as an ordinary (possibly torn) file by recovery above, and a
+        // brand new file is started here instead of resuming it.
+        let next_id = file_ids.last().map_or(0, |id| id + 1);
         let active = ActiveFile::create(&dir, next_id)?;
 
         Ok(Self {
             files: DataFileSet::new(&dir),
             dir,
-            keydir: SharedKeydir::new(Keydir::new()),
+            keydir: SharedKeydir::new(keydir),
             active: RwLock::new(active),
             next_file_id: AtomicU32::new(next_id + 1),
             opts,
@@ -397,20 +394,44 @@ mod tests {
         assert!(matches!(db.merge(), Err(Error::NotImplemented(_))));
     }
 
-    /// Documents today's known gap (see the module docs): reopening a
-    /// directory with existing data does NOT yet recover those keys into
-    /// the new keydir. This test should start failing once plan §6
-    /// (recovery) is implemented — at that point, delete it (or flip it
-    /// into a real recovery test) rather than leaving it stale.
     #[test]
-    fn reopen_does_not_yet_recover_previously_written_keys() {
+    fn reopen_recovers_previously_written_keys() {
         let dir = TempDir::new();
         {
             let db = open(&dir);
-            db.put(b"k", b"v").unwrap();
+            db.put(b"k1", b"v1").unwrap();
+            db.put(b"k2", b"v2").unwrap();
+            db.delete(b"k1").unwrap();
+            db.put(b"k3", b"v3").unwrap();
             db.sync().unwrap();
         }
         let reopened = open(&dir);
-        assert_eq!(reopened.get(b"k").unwrap(), None);
+        assert_eq!(reopened.get(b"k1").unwrap(), None); // deleted, stays deleted
+        assert_eq!(reopened.get(b"k2").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(reopened.get(b"k3").unwrap(), Some(b"v3".to_vec()));
+    }
+
+    /// Plan §6.5's "crash-and-reopen" case: write through the real engine,
+    /// then drop the handle without calling `close()` (an unclean
+    /// shutdown), and confirm reopening recovers everything that was
+    /// written.
+    #[test]
+    fn crash_and_reopen_recovers_all_committed_writes() {
+        let dir = TempDir::new();
+        {
+            let db = open(&dir);
+            for i in 0..500u32 {
+                db.put(format!("k{i}").as_bytes(), format!("v{i}").as_bytes())
+                    .unwrap();
+            }
+            // dropped here without close() — simulates an unclean shutdown
+        }
+        let reopened = open(&dir);
+        for i in 0..500u32 {
+            assert_eq!(
+                reopened.get(format!("k{i}").as_bytes()).unwrap(),
+                Some(format!("v{i}").into_bytes())
+            );
+        }
     }
 }

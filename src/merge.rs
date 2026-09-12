@@ -410,9 +410,19 @@ mod tests {
         let mut expected_keys = db.list_keys().unwrap();
         expected_keys.sort();
 
-        // A fresh, independent open — the keydir is rebuilt purely by
-        // recovery, hint-based here since merge just wrote hint files.
-        let reopened = Engine::open(&*dir, Options::default()).unwrap();
+        // A fresh, independent, *read-only* open (a second read_write
+        // handle on the same directory is correctly refused by the new
+        // single-writer lock — plan §8.1 — while `db` is still open) — the
+        // keydir is rebuilt purely by recovery, hint-based here since merge
+        // just wrote hint files.
+        let reopened = Engine::open(
+            &*dir,
+            Options {
+                read_write: false,
+                ..Options::default()
+            },
+        )
+        .unwrap();
         let mut got_keys = reopened.list_keys().unwrap();
         got_keys.sort();
         assert_eq!(got_keys, expected_keys);

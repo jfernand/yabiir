@@ -7,6 +7,7 @@ mod engine;
 mod error;
 pub mod format;
 pub mod keydir;
+mod lock;
 mod merge;
 mod recovery;
 

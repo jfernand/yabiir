@@ -3,11 +3,8 @@
 //! `docs/bitcask-implementation-plan.md` §4. `open` recovers the keydir
 //! from any existing data/hint files via [`crate::recovery`] (plan §6);
 //! [`Engine::merge`] compacts non-active files via [`crate::merge`] (plan
-//! §7).
-//!
-//! Not implemented yet, deliberately out of scope for this milestone:
-//! - **Locking** (plan §8.1): nothing stops two `read_write` handles from
-//!   being opened on the same directory concurrently yet.
+//! §7); `open` also acquires the process-level single-writer lock via
+//! [`crate::lock`] when `read_write` is set (plan §8.1).
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -19,6 +16,7 @@ use crate::datafile::{ActiveFile, DataFileSet};
 use crate::error::{Error, Result};
 use crate::format;
 use crate::keydir::{Keydir, KeydirEntry, SharedKeydir};
+use crate::lock::DirLock;
 use crate::merge;
 use crate::recovery;
 
@@ -28,7 +26,10 @@ pub struct Engine {
     dir: PathBuf,
     keydir: SharedKeydir,
     files: DataFileSet,
-    /// `RwLock`, not `Mutex`: `put`/`delete`/rotation take the write guard,
+    /// `None` for a `read_write: false` handle — a read-only handle never
+    /// appends, so it never opens (or needs) a writable active file; every
+    /// read goes through `files` instead (see `read_value`). `RwLock`, not
+    /// `Mutex`, when present: `put`/`delete`/rotation take the write guard,
     /// but reading a value out of the still-active file (`read_value`) only
     /// needs a read guard, so concurrent `get`s of recently-written keys
     /// don't serialize against each other (only against a writer). This
@@ -36,9 +37,13 @@ pub struct Engine {
     /// active-file read — that needs a read handle that survives rotation
     /// without going through this lock, which is a further refinement, not
     /// implemented here.
-    active: RwLock<ActiveFile>,
+    active: Option<RwLock<ActiveFile>>,
     next_file_id: AtomicU32,
     opts: Options,
+    /// Held for the lifetime of a `read_write` handle; releases the OS
+    /// `flock` automatically on drop. `None` for a read-only handle, which
+    /// never takes this lock at all (plan §8.1).
+    _write_lock: Option<DirLock>,
 }
 
 impl Engine {
@@ -53,8 +58,14 @@ impl Engine {
     /// Append `encoded` to the active file, rotating to a fresh active file
     /// if the size threshold was crossed, per plan §4.2/§3.4. Returns the
     /// `(file_id, value_pos)` the keydir entry should point at.
+    ///
+    /// Only ever called from `put`/`delete`/`merge`, all of which already
+    /// call `require_write` first — `self.active` being `None` here would
+    /// mean one of them didn't, so this treats that as the same
+    /// [`Error::ReadOnly`] rather than panicking, defensively.
     fn append(&self, encoded: &format::EncodedEntry) -> Result<(u32, u64)> {
-        let mut active = self.active.write().unwrap();
+        let active_lock = self.active.as_ref().ok_or(Error::ReadOnly)?;
+        let mut active = active_lock.write().unwrap();
         let (file_id, value_pos, _total_len) = active.append(encoded)?;
         if self.opts.sync_on_put {
             active.sync()?;
@@ -70,16 +81,21 @@ impl Engine {
     /// Read the value bytes a keydir entry points at: value-only read (plan
     /// §4.3 strategy (a)) — exactly `value_sz` bytes starting at
     /// `value_pos`, no header re-read, no CRC re-verification on the read
-    /// path. Routes to the active file or to [`DataFileSet`] depending on
-    /// whether `entry.file_id` is still the active file, decided within a
+    /// path. If this handle has an active file (read_write) and
+    /// `entry.file_id` is still it, reads through that (decided within a
     /// single lock acquisition so a concurrent rotation can't cause this to
-    /// read the wrong file (see the `active` field's doc comment above).
+    /// read the wrong file — see the `active` field's doc comment above);
+    /// otherwise (including always, for a read-only handle) reads through
+    /// [`DataFileSet`], which works regardless of whether the target file
+    /// happens to be *another* process's current active file, since
+    /// `ActiveFile::append` always flushes before returning.
     fn read_value(&self, entry: KeydirEntry) -> Result<Vec<u8>> {
-        let active = self.active.read().unwrap();
-        if entry.file_id == active.file_id() {
-            return Ok(active.read_at(entry.value_pos, entry.value_sz)?);
+        if let Some(active_lock) = &self.active {
+            let active = active_lock.read().unwrap();
+            if entry.file_id == active.file_id() {
+                return Ok(active.read_at(entry.value_pos, entry.value_sz)?);
+            }
         }
-        drop(active);
         Ok(self
             .files
             .read_at(entry.file_id, entry.value_pos, entry.value_sz)?)
@@ -93,11 +109,13 @@ impl Engine {
     /// on timing.
     #[cfg(test)]
     fn merge_with_hook(&self, hook: impl FnMut(&[u8])) -> Result<()> {
+        self.require_write()?;
+        let active_lock = self.active.as_ref().ok_or(Error::ReadOnly)?;
         merge::merge_with_hook(
             &self.dir,
             &self.keydir,
             &self.files,
-            &self.active,
+            active_lock,
             &self.next_file_id,
             self.opts.max_file_size,
             hook,
@@ -110,6 +128,17 @@ impl Bitcask for Engine {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
 
+        // Acquired before anything else, matching plan §6.1's ordering —
+        // fail fast if another read_write handle already holds it, before
+        // doing any recovery work. Read-only opens never take this lock at
+        // all, so they can coexist with each other and with the single
+        // writer (plan §8.1).
+        let write_lock = if opts.read_write {
+            Some(DirLock::acquire(&dir)?)
+        } else {
+            None
+        };
+
         let file_ids = DataFileSet::discover(&dir)?;
         let mut keydir = Keydir::new();
         recovery::recover(&dir, &file_ids, &mut keydir)?;
@@ -120,15 +149,23 @@ impl Bitcask for Engine {
         // as an ordinary (possibly torn) file by recovery above, and a
         // brand new file is started here instead of resuming it.
         let next_id = file_ids.last().map_or(0, |id| id + 1);
-        let active = ActiveFile::create(&dir, next_id)?;
+        // A read-only handle never appends, so it never opens a writable
+        // active file at all (plan §6.1's `ActiveFile::none_for_read_only`)
+        // — every read for it goes through `files` (see `read_value`).
+        let active = if opts.read_write {
+            Some(RwLock::new(ActiveFile::create(&dir, next_id)?))
+        } else {
+            None
+        };
 
         Ok(Self {
             files: DataFileSet::new(&dir),
             dir,
             keydir: SharedKeydir::new(keydir),
-            active: RwLock::new(active),
+            active,
             next_file_id: AtomicU32::new(next_id + 1),
             opts,
+            _write_lock: write_lock,
         })
     }
 
@@ -195,23 +232,30 @@ impl Bitcask for Engine {
     }
 
     fn merge(&self) -> Result<()> {
+        self.require_write()?;
+        let active_lock = self.active.as_ref().ok_or(Error::ReadOnly)?;
         merge::merge(
             &self.dir,
             &self.keydir,
             &self.files,
-            &self.active,
+            active_lock,
             &self.next_file_id,
             self.opts.max_file_size,
         )
     }
 
     fn sync(&self) -> Result<()> {
-        Ok(self.active.write().unwrap().sync()?)
+        if let Some(active) = &self.active {
+            active.write().unwrap().sync()?;
+        }
+        Ok(())
     }
 
     fn close(self) -> Result<()> {
-        let mut active = self.active.into_inner().unwrap();
-        Ok(active.sync()?)
+        if let Some(active) = self.active {
+            active.into_inner().unwrap().sync()?;
+        }
+        Ok(())
     }
 }
 
@@ -499,5 +543,107 @@ mod tests {
         merger.join().unwrap();
 
         assert_eq!(db.get(b"K").unwrap(), Some(b"new".to_vec()));
+    }
+
+    /// Plan §8.3: a second `read_write` handle on a directory that already
+    /// has one open must fail cleanly (not panic, not hang).
+    #[test]
+    fn second_read_write_open_is_rejected_while_first_is_held() {
+        let dir = TempDir::new();
+        let _first = open(&dir);
+        let second = Engine::open(&*dir, Options::default());
+        assert!(matches!(second, Err(Error::AlreadyLocked)));
+    }
+
+    /// Plan §8.3: a read-only open must succeed concurrently with an
+    /// existing read_write handle, since it never takes the write lock.
+    #[test]
+    fn read_only_open_succeeds_concurrently_with_a_read_write_open() {
+        let dir = TempDir::new();
+        let writer = open(&dir);
+        writer.put(b"k", b"v").unwrap();
+
+        let reader = Engine::open(
+            &*dir,
+            Options {
+                read_write: false,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reader.get(b"k").unwrap(), Some(b"v".to_vec()));
+
+        // the writer is still usable too — the read-only open didn't
+        // disturb it.
+        writer.put(b"k2", b"v2").unwrap();
+        assert_eq!(writer.get(b"k2").unwrap(), Some(b"v2".to_vec()));
+    }
+
+    /// Plan §8.3: dropping the read_write handle releases the lock, so a
+    /// subsequent read_write open succeeds.
+    #[test]
+    fn dropping_the_write_handle_releases_the_lock_for_the_next_open() {
+        let dir = TempDir::new();
+        {
+            let db = open(&dir);
+            db.put(b"k", b"v").unwrap();
+            // dropped at end of this block
+        }
+        let db = open(&dir); // must not fail with AlreadyLocked
+        assert_eq!(db.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// `close()` also releases the lock (it's just an early, explicit
+    /// version of the same drop), not only an implicit drop out of scope.
+    #[test]
+    fn close_releases_the_lock_for_the_next_open() {
+        let dir = TempDir::new();
+        let db = open(&dir);
+        db.put(b"k", b"v").unwrap();
+        db.close().unwrap();
+
+        let db = open(&dir); // must not fail with AlreadyLocked
+        assert_eq!(db.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// A read-only handle never touches the write lock at all, so two of
+    /// them can coexist even with no writer present.
+    #[test]
+    fn multiple_read_only_opens_coexist() {
+        let dir = TempDir::new();
+        {
+            let db = open(&dir);
+            db.put(b"k", b"v").unwrap();
+        }
+        let read_only_opts = || Options {
+            read_write: false,
+            ..Options::default()
+        };
+        let r1 = Engine::open(&*dir, read_only_opts()).unwrap();
+        let r2 = Engine::open(&*dir, read_only_opts()).unwrap();
+        assert_eq!(r1.get(b"k").unwrap(), Some(b"v".to_vec()));
+        assert_eq!(r2.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// Read-only handles must not be able to mutate the datastore even
+    /// through `merge` (which was previously ungated — merge does real
+    /// destructive writes and file removal, so it needs the write lock
+    /// like everything else).
+    #[test]
+    fn merge_is_rejected_on_a_read_only_handle() {
+        let dir = TempDir::new();
+        {
+            let db = open(&dir);
+            db.put(b"k", b"v").unwrap();
+        }
+        let ro = Engine::open(
+            &*dir,
+            Options {
+                read_write: false,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(ro.merge(), Err(Error::ReadOnly)));
     }
 }

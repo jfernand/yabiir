@@ -9,7 +9,7 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use yabiir::keydir::{Keydir, KeydirEntry, SharedKeydir};
 
-const POPULATION_SIZES: &[usize] = &[100, 1_000, 10_000, 100_000, 1_000_000];
+const POPULATION_SIZES: &[usize] = &[100, 1_000, 10_000, 100_000];
 
 fn entry(n: u32) -> KeydirEntry {
     KeydirEntry {

@@ -19,3 +19,11 @@ criterion = "0.8.2"
 [[bench]]
 name = "format"
 harness = false
+
+[[bench]]
+name = "keydir"
+harness = false
+
+[[bench]]
+name = "datafile"
+harness = false

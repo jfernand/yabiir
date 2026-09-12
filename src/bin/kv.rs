@@ -25,6 +25,9 @@ enum Command {
     Rm { key: String },
     /// List all keys.
     List,
+    /// Compact non-active data files, reclaiming space from superseded
+    /// values and deleted keys.
+    Merge,
 }
 
 fn main() -> ExitCode {
@@ -66,6 +69,10 @@ fn run(args: Args) -> yabiir::Result<ExitCode> {
             for key in db.list_keys()? {
                 println!("{}", String::from_utf8_lossy(&key));
             }
+            ExitCode::SUCCESS
+        }
+        Command::Merge => {
+            db.merge()?;
             ExitCode::SUCCESS
         }
     };

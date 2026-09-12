@@ -29,21 +29,17 @@ enum Command {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    match run(args) {
-        Ok(code) => code,
-        Err(err) => {
-            eprintln!("error: {err}");
-            ExitCode::FAILURE
-        }
-    }
+    run(args).unwrap_or_else(|err| {
+        eprintln!("error: {err}");
+        ExitCode::FAILURE
+    })
 }
 
-/// Each invocation of this CLI is a fresh process: it opens the datastore,
-/// does exactly one operation, and exits. Recovery
-/// (`docs/bitcask-implementation-plan.md` §6) isn't implemented yet, so a
-/// directory that already has data on disk from a *previous* invocation
-/// starts this one with an empty keydir — an `add` followed by a separate
-/// `get` invocation won't find the key until recovery lands.
+/// Each invocation of this CLI is a fresh process: it opens the datastore
+/// (recovering the keydir from any existing data/hint files —
+/// `docs/bitcask-implementation-plan.md` §6), does exactly one operation,
+/// and exits — so an `add` followed by a separate `get` invocation does
+/// find the key.
 fn run(args: Args) -> yabiir::Result<ExitCode> {
     let db = Engine::open(&args.dir, Options::default())?;
 

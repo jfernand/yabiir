@@ -169,6 +169,17 @@ impl DataFileSet {
         };
         pread_exact(&file, pos, len)
     }
+
+    /// Drop this set's cached read handle for `file_id`, if any. Called by
+    /// merge after removing an input file from disk — without this, the
+    /// file's disk blocks would stay allocated (kept alive by the cached
+    /// open `Arc<File>`) even after `remove_file` unlinked it from the
+    /// directory, for as long as this `DataFileSet` exists (plan §3.3's
+    /// "never evict" was written before merge existed to ever remove
+    /// files; this is the one place that assumption needs an exception).
+    pub fn forget(&self, file_id: u32) {
+        self.readers.lock().unwrap().remove(&file_id);
+    }
 }
 
 fn parse_data_file_id(name: &str) -> Option<u32> {

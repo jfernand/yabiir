@@ -39,3 +39,10 @@ harness = false
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Same optimizations as release, plus debug symbols, so `cargo flamegraph`
+# (perf-based) can resolve real function names instead of raw addresses.
+# Kept separate from [profile.release] so normal release builds stay lean.
+[profile.profiling]
+inherits = "release"
+debug = true

@@ -1,3 +1,10 @@
 /target
 restart
 .idea/
+
+# profiling output (cargo flamegraph / perf) — generated, large, and
+# specific to one machine/run; not meant to be committed
+/perf.data
+/perf.data.old
+/flamegraph.svg
+/*.csv

@@ -97,8 +97,8 @@ implementation details):
   ever needed (in this design we don't actually need it for correctness,
   since file_id+offset ordering already gives us a total order — keep
   `tstamp` for format fidelity and for future use, e.g. TTL/expiry).
-- **CRC32, not CRC32C**: use whichever the chosen crate makes easiest
-  (`crc32fast` implements the standard IEEE CRC32 with SIMD acceleration).
+- **CRC32, not CRC32C**: use whichever the chosen crate makes easiest (`crc32fast` implements the standard IEEE CRC32
+  with SIMD acceleration).
   Consistency matters more than which polynomial.
 
 ### 1.2 Tombstone representation
@@ -212,7 +212,9 @@ pub const HEADER_SIZE: usize = 16;
 /// belongs. Also carries `value_len` so callers (`ActiveFile::append`)
 /// don't need a second, separately-threaded length parameter that could
 /// drift out of sync with the buffer.
-pub struct EncodedEntry { /* bytes: Vec<u8>, value_len: usize */ }
+pub struct EncodedEntry {
+    /* bytes: Vec<u8>, value_len: usize */
+}
 impl EncodedEntry {
     pub fn as_bytes(&self) -> &[u8];
     pub fn value_len(&self) -> usize;
@@ -230,7 +232,9 @@ pub const HINT_HEADER_SIZE: usize = 20;
 
 /// A fully-encoded hint-file record. Same rationale as `EncodedEntry` for
 /// being its own type rather than a bare `Vec<u8>`.
-pub struct EncodedHint { /* bytes: Vec<u8> */ }
+pub struct EncodedHint {
+    /* bytes: Vec<u8> */
+}
 impl EncodedHint {
     pub fn as_bytes(&self) -> &[u8];
 }
@@ -240,6 +244,7 @@ pub fn decode_hint_header(buf: &[u8; HINT_HEADER_SIZE]) -> (EntryHeader, u64 /*v
 ```
 
 Implementation notes:
+
 - `encode_entry` builds the buffer tail-first (key+value+header-minus-crc),
   computes CRC over that, then prepends the CRC — or just build the whole
   buffer and compute CRC over `buf[4..]` in place. Either is fine; prefer
@@ -247,10 +252,13 @@ Implementation notes:
   owned by `ActiveFile` later, to avoid per-write allocation — note as a
   later optimization, not required for v1).
 - `decode_entry_header` takes a fixed `[u8; 16]` so callers do one
-  `read_exact` for the header, then know exactly how many more bytes
-  (`ksz + value_sz`) to `read_exact` for the body — no length-prefixed
+  `read_exact` for the header, then know exactly how many more bytes (`ksz + value_sz`) to `read_exact` for the body —
+  no length-prefixed
   parsing ambiguity.
-- Provide a `read_entry_at<R: Read + Seek>(r: &mut R, offset: u64) -> io::Result<Option<Entry>>` convenience that seeks, reads header, reads body, verifies CRC, and returns `Ok(None)` on a **clean EOF exactly at entry start** (used by recovery to detect "no more entries") vs. `Err` on a **partial/truncated entry** (used by recovery to detect "crashed mid-write, stop here").
+- Provide a `read_entry_at<R: Read + Seek>(r: &mut R, offset: u64) -> io::Result<Option<Entry>>` convenience that seeks,
+  reads header, reads body, verifies CRC, and returns `Ok(None)` on a **clean EOF exactly at entry start** (used by
+  recovery to detect "no more entries") vs. `Err` on a **partial/truncated entry** (used by recovery to detect "crashed
+  mid-write, stop here").
 
 ### 1.5 Tests for this step
 
@@ -303,7 +311,7 @@ impl Keydir {
     pub fn insert(&mut self, key: &[u8], entry: KeydirEntry);
     pub fn remove(&mut self, key: &[u8]) -> Option<KeydirEntry>;
     pub fn len(&self) -> usize;
-    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &KeydirEntry)>;
+    pub fn iter(&self) -> impl Iterator<Item=(&[u8], &KeydirEntry)>;
     /// Compare-and-repoint used by merge: only overwrite if the entry is
     /// still exactly what merge observed when it copied this key forward
     /// (i.e. no newer write raced ahead of the merge for this key).
@@ -385,6 +393,7 @@ impl ActiveFile {
 ```
 
 Key correctness details:
+
 - `append` must compute `value_pos` as `self.offset + (encoded.len() -
   encoded.value_len())`, i.e. the position where the *value* bytes start
   within the file — that's what the keydir stores and what reads seek to
@@ -443,6 +452,7 @@ impl DataFileSet {
 
 Rotation is a **write-path** concern (triggered from `put`/`delete` in
 engine.rs, not internal to `ActiveFile`), because rotating requires:
+
 1. `active.sync()` (flush + fsync the outgoing file — don't leave a closed
    file with buffered-but-unflushed data).
 2. Drop the old `ActiveFile` (closes the write handle; the file is now
@@ -768,6 +778,7 @@ fn scan_hint_file(hint_path, file_id, keydir) -> Result<()> {
 The paper's model says closed files are never reopened for writing. If the
 process crashed while `file_id = N` was active, on restart file `N` may have
 a torn last entry. Two options:
+
 1. Treat `N` as immutable-but-possibly-torn: scan it with the same
    truncation handling as §6.2 (stops cleanly at the torn entry, keeps
    everything before it), and start a **new** active file `N+1`. This is
@@ -789,8 +800,8 @@ worth the complexity now.
   no hint files, open a `Bitcask` read-only and assert `get` returns the
   expected last-write-wins values.
 - **Hint-based recovery**: same setup, but also hand-write a valid hint file
-  for the older data file; assert recovery produces an identical keydir
-  (compare via `list_keys` + `get` for every key) to the full-scan case —
+  for the older data file; assert recovery produces an identical keydir (compare via `list_keys` + `get` for every key)
+  to the full-scan case —
   this is the key equivalence property to test explicitly.
 - **Truncated tail**: hand-write a data file, then truncate it a few bytes
   into the last entry's value; open; assert every entry *before* the
@@ -804,7 +815,7 @@ worth the complexity now.
   `close()`) the handle to simulate an unclean shutdown, reopen the
   directory, assert all N entries are present and correct.
 - **Orphaned hint file**: a `.bitcask.hint` with no matching `.bitcask.data`
-  — assert open() succeeds and simply ignores it (with a warning), rather
+  — assert open () succeeds and simply ignores it (with a warning), rather
   than erroring.
 
 ---
@@ -815,8 +826,8 @@ worth the complexity now.
 
 An entry at `(file_id=F, offset=O)` for key `K` is **live** iff the current
 keydir entry for `K` is exactly `(file_id=F, value_pos=O + HEADER_SIZE +
-ksz)`. Anything else — a superseded older version of `K`, or a tombstone (
-tombstones are never "live" since a live tombstone by definition means the
+ksz)`. Anything else — a superseded older version of `K`, or a tombstone (tombstones are never "live" since a live
+tombstone by definition means the
 key is deleted and shouldn't be in the keydir at all) — is dead and can be
 dropped during merge.
 
@@ -933,8 +944,8 @@ impl<'a> MergeOutputWriter<'a> {
 - **Untouched active file**: put some keys, note the active file's id, merge;
   assert that file id is untouched/still present and still active
   afterward.
-- **Race: concurrent put during merge wins**: use a synchronization point
-  (e.g. a test-only hook or a channel) to pause merge right after it reads
+- **Race: concurrent put during merge wins**: use a synchronization point (e.g. a test-only hook or a channel) to pause
+  merge right after it reads
   `K`'s old value but before it repoints the keydir; from another thread,
   `put(K, new_value)`; let merge finish; assert `get(K) == new_value`, not
   the value merge was copying forward. This directly tests §7.3.
@@ -948,8 +959,8 @@ impl<'a> MergeOutputWriter<'a> {
   several threads concurrently doing put/get/delete on random keys from a
   small keyspace (to force overlap) for a fixed duration; at the end, stop
   all threads, and assert the final state (queried via `get`) matches an
-  in-memory reference `HashMap` that was updated in lock-step by the test
-  (e.g. via a shared `Mutex<HashMap>` the test threads also write to
+  in-memory reference `HashMap` that was updated in lock-step by the test (e.g. via a shared `Mutex<HashMap>` the test
+  threads also write to
   alongside calling the real API, then compare).
 
 ---
@@ -982,14 +993,14 @@ coexist with each other and with the single writer.
 
 ### 8.2 In-process synchronization summary
 
-| Path | Lock held |
-|---|---|
-| `put`/`delete` (append step) | `active: Mutex<ActiveFile>` |
-| `put`/`delete` (keydir update step) | `keydir: RwLock` write guard, brief |
-| `get` | `keydir: RwLock` read guard (brief, just the lookup) + no lock during the actual disk `pread` (uses `DataFileSet`'s internal handle-cache mutex only briefly to fetch/insert a `File`, not for the read itself) |
-| `merge` (scan phase) | no keydir lock held while reading entries off disk |
-| `merge` (per-key repoint) | `keydir` write guard, one `cas_repoint` call at a time — never holds it across disk I/O |
-| `fold`/`list_keys` | `keydir` read guard only for the initial snapshot, released before any disk I/O |
+| Path                                | Lock held                                                                                                                                                                                                       |
+|-------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `put`/`delete` (append step)        | `active: Mutex<ActiveFile>`                                                                                                                                                                                     |
+| `put`/`delete` (keydir update step) | `keydir: RwLock` write guard, brief                                                                                                                                                                             |
+| `get`                               | `keydir: RwLock` read guard (brief, just the lookup) + no lock during the actual disk `pread` (uses `DataFileSet`'s internal handle-cache mutex only briefly to fetch/insert a `File`, not for the read itself) |
+| `merge` (scan phase)                | no keydir lock held while reading entries off disk                                                                                                                                                              |
+| `merge` (per-key repoint)           | `keydir` write guard, one `cas_repoint` call at a time — never holds it across disk I/O                                                                                                                         |
+| `fold`/`list_keys`                  | `keydir` read guard only for the initial snapshot, released before any disk I/O                                                                                                                                 |
 
 The guiding rule threaded through the whole design: **never hold a lock
 across a disk I/O call**. Every lock acquisition above is either (a) around
@@ -1092,18 +1103,18 @@ crate like this is a good place to just take the dependency).
 
 ## 10. Testing & validation matrix
 
-| Layer | What | Where |
-|---|---|---|
-| Unit | `format.rs` encode/decode/CRC/truncation | `src/format.rs` `#[cfg(test)]` |
-| Unit | `keydir.rs` insert/remove/CAS + threaded stress | `src/keydir.rs` `#[cfg(test)]` |
-| Unit | `datafile.rs` append/read/rotation/concurrent pread | `src/datafile.rs` `#[cfg(test)]` |
-| Integration | CRUD, persistence across reopen | `tests/crud.rs` |
-| Integration | Recovery: full-scan, hint-based, truncated tail, corrupt entry, orphaned hint | `tests/recovery.rs` |
-| Integration | Merge: compaction, tombstone reclaim, race-safety, post-merge recovery equivalence | `tests/merge.rs` |
-| Integration | Locking: second-writer rejection, reader/writer coexistence | `tests/locking.rs` |
-| Integration | Concurrency stress: put/get/delete/merge all running together vs. a reference model | `tests/concurrency.rs` |
-| Property (optional) | `proptest`: random op sequences (put/delete/get/reopen/merge) vs. `HashMap` reference model | `tests/model.rs` |
-| Benchmark (optional) | Sequential write throughput, single-key read latency, at small scale | `benches/throughput.rs` (criterion) |
+| Layer                | What                                                                                        | Where                               |
+|----------------------|---------------------------------------------------------------------------------------------|-------------------------------------|
+| Unit                 | `format.rs` encode/decode/CRC/truncation                                                    | `src/format.rs` `#[cfg(test)]`      |
+| Unit                 | `keydir.rs` insert/remove/CAS + threaded stress                                             | `src/keydir.rs` `#[cfg(test)]`      |
+| Unit                 | `datafile.rs` append/read/rotation/concurrent pread                                         | `src/datafile.rs` `#[cfg(test)]`    |
+| Integration          | CRUD, persistence across reopen                                                             | `tests/crud.rs`                     |
+| Integration          | Recovery: full-scan, hint-based, truncated tail, corrupt entry, orphaned hint               | `tests/recovery.rs`                 |
+| Integration          | Merge: compaction, tombstone reclaim, race-safety, post-merge recovery equivalence          | `tests/merge.rs`                    |
+| Integration          | Locking: second-writer rejection, reader/writer coexistence                                 | `tests/locking.rs`                  |
+| Integration          | Concurrency stress: put/get/delete/merge all running together vs. a reference model         | `tests/concurrency.rs`              |
+| Property (optional)  | `proptest`: random op sequences (put/delete/get/reopen/merge) vs. `HashMap` reference model | `tests/model.rs`                    |
+| Benchmark (optional) | Sequential write throughput, single-key read latency, at small scale                        | `benches/throughput.rs` (criterion) |
 
 For the property-based model test, sketch the harness up front since it's
 the highest-leverage test for a storage engine like this:
@@ -1150,13 +1161,13 @@ the interesting bugs live).
    criterion: append-then-read-back test passes; concurrent pread test
    passes.*
 4. Single-file engine: `put`/`get`/`delete` with **no rotation, no merge, no
-   recovery** — just prove the append+keydir+read loop works in one file
-   (§4, partial). *Exit criterion: §4.5 tests pass against a single fixed
+   recovery** — just prove the append+keydir+read loop works in one file (§4, partial). *Exit criterion: §4.5 tests pass
+   against a single fixed
    active file.*
 5. Add file rotation (§3.4). *Exit criterion: small-threshold rotation test
    from §3.5 passes; §4.5 tests still pass unmodified.*
-6. Add startup recovery by full scan, no hint files yet (§6.1-6.2, 6.4).
-   *Exit criterion: full-scan and truncated-tail recovery tests from §6.5
+6. Add startup recovery by full scan, no hint files yet (§6.1-6.2, 6.4). *Exit criterion: full-scan and truncated-tail
+   recovery tests from §6.5
    pass.*
 7. Add hint files + hint-based fast recovery (§6.3). *Exit criterion:
    hint-based recovery test matches full-scan recovery test output exactly.*
@@ -1190,9 +1201,8 @@ easy to bisect if a later step reveals a bug introduced earlier.
   and treats it as an open question.
 - **No cross-process shared keydir** — the paper's "share the keydir with
   another Erlang process in the same VM" is a BEAM-specific optimization;
-  each OS process that opens the Bitcask builds and owns its own keydir.
-  (A future extension could add a shared-memory keydir for multiple
-  *threads* within one Rust process that already share the `Bitcask` handle,
+  each OS process that opens the Bitcask builds and owns its own keydir. (A future extension could add a shared-memory
+  keydir for multiple *threads* within one Rust process that already share the `Bitcask` handle,
   which this design already gets for free via `Arc<Bitcask>` — just don't
   try to share across separate OS processes.)
 - **Merge holds one CAS-repoint per key, not a giant single global lock at

@@ -4,6 +4,7 @@
 //! Run with: `cargo bench --bench keydir`
 
 use std::hint::black_box;
+use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use yabiir::keydir::{Keydir, KeydirEntry, SharedKeydir};
@@ -36,6 +37,15 @@ fn bench_insert_new_key(c: &mut Criterion) {
     // already holds `size` entries, isolating the "grow the map" cost from
     // "overwrite in place" (bench_insert_overwrite, below).
     let mut group = c.benchmark_group("insert_new_key");
+    // iter_batched rebuilds a `size`-entry Keydir per sample below, so at
+    // the largest population size that setup alone dominates the default
+    // 5s measurement window. Lower the sample count *and* explicitly
+    // declare the longer measurement time this group actually needs —
+    // sample_size alone still isn't enough to clear Criterion's default 5s
+    // window at 1,000,000 entries, and leaving that implicit just trades
+    // one "unable to complete in time" warning for another.
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(15));
     for &size in POPULATION_SIZES {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
@@ -92,6 +102,8 @@ fn bench_get_miss(c: &mut Criterion) {
 
 fn bench_remove(c: &mut Criterion) {
     let mut group = c.benchmark_group("remove");
+    group.sample_size(20); // see insert_new_key's comment
+    group.measurement_time(Duration::from_secs(15));
     for &size in POPULATION_SIZES {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
@@ -108,6 +120,8 @@ fn bench_remove(c: &mut Criterion) {
 fn bench_cas_repoint_success(c: &mut Criterion) {
     // The common case on merge's happy path: nothing raced, the CAS wins.
     let mut group = c.benchmark_group("cas_repoint_success");
+    group.sample_size(20); // see insert_new_key's comment
+    group.measurement_time(Duration::from_secs(15));
     for &size in POPULATION_SIZES {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
@@ -147,6 +161,11 @@ fn bench_cas_repoint_failure(c: &mut Criterion) {
 /// keydir, unlike every other operation benchmarked here.
 fn bench_snapshot(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot");
+    // Unlike the groups above, this is genuine timed work (cloning up to
+    // 1,000,000 entries out), not per-sample setup overhead, so keep the
+    // full default sample count for a tighter estimate and just give it
+    // the longer window that many samples of that actually need.
+    group.measurement_time(Duration::from_secs(16));
     for &size in POPULATION_SIZES {
         let shared = SharedKeydir::new(populated(size));
         group.throughput(Throughput::Elements(size as u64));

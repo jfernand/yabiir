@@ -2,6 +2,39 @@
 //! non-active data file into a fresh, smaller set of data files (each with
 //! an accompanying hint file), then remove the old files. See
 //! `docs/bitcask-implementation-plan.md` §7.
+//!
+//! ## File-ordering correctness (found by `tests/model.rs`'s proptest)
+//!
+//! Recovery (`crate::recovery`) rebuilds the keydir by scanning files in
+//! ascending `file_id` order and letting later entries unconditionally
+//! overwrite earlier ones — "last write wins" falls out of that order being
+//! a correct proxy for chronological order. Merge output claims fresh ids
+//! from the *same* counter active-file rotation uses, so on its own that's
+//! fine. But if the active file at the moment merge starts happens to
+//! *stay* active (never crosses the rotation threshold) through and after
+//! the merge, it keeps its old, low id — while merge's output claims a
+//! *higher* one. Any further write landing in that still-active file (even
+//! well after merge returns, no concurrency required) then has a lower id
+//! than data merge already considered "older", and a future recovery scans
+//! them in the wrong order, silently resurrecting stale values.
+//!
+//! Fixed by having `merge` force the active file to rotate at the end if
+//! its own output ever caught up to or passed it, so the active file is
+//! always the numerically newest thing in the directory again once merge
+//! returns — the same invariant `open()` establishes fresh every time
+//! (plan §6.4). This fully resolves the sequential case above. It does
+//! **not** fully resolve a key written *truly concurrently* with a merge
+//! that also touches that key, followed by a reopen: such a write still
+//! lands in the pre-merge active file before the forced rotation can run,
+//! so it can still end up misordered on a *subsequent* recovery, even
+//! though the CAS-repoint below keeps the live, in-memory keydir correct
+//! for the remainder of that same session. Closing that gap in general
+//! would need merge output to reuse ids freed by the files it replaces
+//! (rather than claim new ones), which in turn needs a rename-based
+//! finalization step designed carefully enough not to let a concurrent
+//! read observe a renamed-but-not-yet-repointed file under stale keydir
+//! coordinates — not implemented here; flagged as a known limitation
+//! rather than worked around with an unproven fix.
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -69,6 +102,7 @@ pub(crate) fn merge_with_hook(
     // 2. Iterate input files oldest -> newest, entry by entry, copying
     //    forward only the live ones.
     let mut out = MergeOutputWriter::new(dir, next_file_id, max_file_size)?;
+    let mut highest_output_id = out.current_file_id();
     for &file_id in &input_ids {
         let data_path = DataFileSet::data_path(dir, file_id);
         for (offset, entry) in read_all_entries(&data_path)? {
@@ -84,6 +118,7 @@ pub(crate) fn merge_with_hook(
             }
 
             let (new_file_id, new_value_pos) = out.write_live_entry(&entry)?;
+            highest_output_id = highest_output_id.max(out.current_file_id());
             before_repoint(&entry.key);
 
             // 3. Repoint the keydir ONLY IF it still points at the exact
@@ -121,6 +156,20 @@ pub(crate) fn merge_with_hook(
         let _ = fs::remove_file(DataFileSet::data_path(dir, file_id));
         let _ = fs::remove_file(DataFileSet::hint_path(dir, file_id));
         files.forget(file_id);
+    }
+
+    // 5. Restore "the active file is numerically newest" if merge's own
+    //    output caught up to or passed it — see the module-level doc note
+    //    above on why this matters for a future recovery's scan order. A
+    //    no-op in the common case where the active file already rotated
+    //    past highest_output_id on its own (e.g. from puts during merge).
+    {
+        let mut active_guard = active.write().unwrap();
+        if active_guard.file_id() <= highest_output_id {
+            active_guard.sync()?;
+            let new_id = next_file_id.fetch_add(1, Ordering::SeqCst);
+            *active_guard = ActiveFile::create(dir, new_id)?;
+        }
     }
 
     Ok(())
@@ -197,6 +246,10 @@ impl<'a> MergeOutputWriter<'a> {
         let data = ActiveFile::create(dir, file_id)?;
         let hint = BufWriter::new(File::create(DataFileSet::hint_path(dir, file_id))?);
         Ok((data, hint))
+    }
+
+    fn current_file_id(&self) -> u32 {
+        self.current_data.file_id()
     }
 
     fn write_live_entry(&mut self, entry: &Entry) -> io::Result<(u32, u64)> {
@@ -316,13 +369,24 @@ mod tests {
         for &id in &before_ids[..before_ids.len() - 1] {
             assert!(!after_ids.contains(&id), "old file {id} should have been removed");
         }
-        let new_ids: Vec<u32> = after_ids
+        // The highest id after merge is always the (possibly freshly
+        // forced-rotated, per merge.rs's file-ordering correctness note)
+        // active file — an ordinary ActiveFile, not a merge output, so it
+        // has no hint file. Every *other* new id is a genuine merge output
+        // and must have one.
+        let mut new_ids: Vec<u32> = after_ids
             .iter()
             .copied()
             .filter(|id| !before_ids.contains(id))
             .collect();
+        new_ids.sort_unstable();
         assert!(!new_ids.is_empty(), "expected at least one new merge-output file");
-        for &id in &new_ids {
+        let merge_output_ids = &new_ids[..new_ids.len() - 1];
+        assert!(
+            !merge_output_ids.is_empty(),
+            "expected at least one new merge-output file besides the active file, got {new_ids:?}"
+        );
+        for &id in merge_output_ids {
             assert!(
                 DataFileSet::hint_path(&dir, id).exists(),
                 "merge output file {id} missing its hint file"

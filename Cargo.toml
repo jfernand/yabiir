@@ -17,6 +17,7 @@ path = "src/bin/kv.rs"
 
 [dev-dependencies]
 criterion = "0.8.2"
+proptest = "1"
 
 [[bench]]
 name = "format"

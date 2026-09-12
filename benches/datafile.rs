@@ -14,7 +14,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use yabiir::datafile::{ActiveFile, DataFileSet};
 use yabiir::format;
 
-const VALUE_SIZES: &[usize] = &[64, 1024, 64 * 1024];
+const VALUE_SIZES: &[usize] = &[64, 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024];
 
 /// Minimal self-cleaning temp directory — mirrors the one in
 /// `src/datafile.rs`'s own tests, duplicated here since that one is

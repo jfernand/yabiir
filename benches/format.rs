@@ -14,7 +14,7 @@ use yabiir::format::{
 
 const KEY: &[u8] = b"benchmark-key-0000000000";
 
-const VALUE_SIZES: &[usize] = &[0, 64, 1024, 64 * 1024, 1024 * 1024];
+const VALUE_SIZES: &[usize] = &[64, 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024];
 
 fn bench_encode_entry(c: &mut Criterion) {
     let mut group = c.benchmark_group("encode_entry");

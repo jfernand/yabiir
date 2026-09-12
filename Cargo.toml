@@ -11,7 +11,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 [lib]
 
 [[bin]]
-name = "e"
+name = "kv"
 path = "src/bin/kv.rs"
 
 [dev-dependencies]
@@ -28,3 +28,8 @@ harness = false
 [[bench]]
 name = "datafile"
 harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

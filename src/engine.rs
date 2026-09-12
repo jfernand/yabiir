@@ -7,7 +7,7 @@
 //! [`crate::lock`] when `read_write` is set (plan §8.1).
 
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,16 +28,12 @@ pub struct Engine {
     files: DataFileSet,
     /// `None` for a `read_write: false` handle — a read-only handle never
     /// appends, so it never opens (or needs) a writable active file; every
-    /// read goes through `files` instead (see `read_value`). `RwLock`, not
-    /// `Mutex`, when present: `put`/`delete`/rotation take the write guard,
-    /// but reading a value out of the still-active file (`read_value`) only
-    /// needs a read guard, so concurrent `get`s of recently-written keys
-    /// don't serialize against each other (only against a writer). This
-    /// falls short of plan §8.2's ideal of *no* lock at all during the
-    /// active-file read — that needs a read handle that survives rotation
-    /// without going through this lock, which is a further refinement, not
-    /// implemented here.
-    active: Option<RwLock<ActiveFile>>,
+    /// read goes through `files` instead (see `read_value`). Only ever
+    /// locked for writing (`append`/rotation/merge's force-rotate), never
+    /// read — `get`/`fold` don't touch this lock at all (see `read_value`),
+    /// so a plain `Mutex` is all that's needed; there's no reader side left
+    /// for `RwLock` to buy anything over `Mutex`.
+    active: Option<Mutex<ActiveFile>>,
     next_file_id: AtomicU32,
     opts: Options,
     /// Held for the lifetime of a `read_write` handle; releases the OS
@@ -65,7 +61,7 @@ impl Engine {
     /// [`Error::ReadOnly`] rather than panicking, defensively.
     fn append(&self, encoded: &format::EncodedEntry) -> Result<(u32, u64)> {
         let active_lock = self.active.as_ref().ok_or(Error::ReadOnly)?;
-        let mut active = active_lock.write().unwrap();
+        let mut active = active_lock.lock().unwrap();
         let (file_id, value_pos, _total_len) = active.append(encoded)?;
         if self.opts.sync_on_put {
             active.sync()?;
@@ -81,21 +77,15 @@ impl Engine {
     /// Read the value bytes a keydir entry points at: value-only read (plan
     /// §4.3 strategy (a)) — exactly `value_sz` bytes starting at
     /// `value_pos`, no header re-read, no CRC re-verification on the read
-    /// path. If this handle has an active file (read_write) and
-    /// `entry.file_id` is still it, reads through that (decided within a
-    /// single lock acquisition so a concurrent rotation can't cause this to
-    /// read the wrong file — see the `active` field's doc comment above);
-    /// otherwise (including always, for a read-only handle) reads through
-    /// [`DataFileSet`], which works regardless of whether the target file
-    /// happens to be *another* process's current active file, since
-    /// `ActiveFile::append` always flushes before returning.
+    /// path. Always goes through [`DataFileSet`], regardless of whether
+    /// `entry.file_id` happens to be *this* handle's current active file or
+    /// even *another* process's — `ActiveFile::append` always flushes
+    /// before returning, so a keydir entry is never published until its
+    /// bytes are already visible to a fresh, independent `File::open`.
+    /// That's what lets this skip the active-file lock entirely: no read
+    /// ever needs to touch it (plan §8.2's ideal of no lock at all during
+    /// an active-file read).
     fn read_value(&self, entry: KeydirEntry) -> Result<Vec<u8>> {
-        if let Some(active_lock) = &self.active {
-            let active = active_lock.read().unwrap();
-            if entry.file_id == active.file_id() {
-                return Ok(active.read_at(entry.value_pos, entry.value_sz)?);
-            }
-        }
         Ok(self
             .files
             .read_at(entry.file_id, entry.value_pos, entry.value_sz)?)
@@ -153,7 +143,7 @@ impl Bitcask for Engine {
         // active file at all (plan §6.1's `ActiveFile::none_for_read_only`)
         // — every read for it goes through `files` (see `read_value`).
         let active = if opts.read_write {
-            Some(RwLock::new(ActiveFile::create(&dir, next_id)?))
+            Some(Mutex::new(ActiveFile::create(&dir, next_id)?))
         } else {
             None
         };
@@ -246,7 +236,7 @@ impl Bitcask for Engine {
 
     fn sync(&self) -> Result<()> {
         if let Some(active) = &self.active {
-            active.write().unwrap().sync()?;
+            active.lock().unwrap().sync()?;
         }
         Ok(())
     }

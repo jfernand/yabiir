@@ -39,7 +39,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::datafile::{ActiveFile, DataFileSet};
@@ -62,7 +62,7 @@ pub fn merge(
     dir: &Path,
     keydir: &SharedKeydir,
     files: &DataFileSet,
-    active: &RwLock<ActiveFile>,
+    active: &Mutex<ActiveFile>,
     next_file_id: &AtomicU32,
     max_file_size: u64,
 ) -> Result<()> {
@@ -80,7 +80,7 @@ pub(crate) fn merge_with_hook(
     dir: &Path,
     keydir: &SharedKeydir,
     files: &DataFileSet,
-    active: &RwLock<ActiveFile>,
+    active: &Mutex<ActiveFile>,
     next_file_id: &AtomicU32,
     max_file_size: u64,
     mut before_repoint: impl FnMut(&[u8]),
@@ -90,7 +90,7 @@ pub(crate) fn merge_with_hook(
     //    *during* the merge (concurrent puts are still allowed) are simply
     //    not included in this pass — they'll be picked up by the next
     //    merge. Safe and simple (plan §7.2 step 1).
-    let active_id_at_start = active.read().unwrap().file_id();
+    let active_id_at_start = active.lock().unwrap().file_id();
     let input_ids: Vec<u32> = DataFileSet::discover(dir)?
         .into_iter()
         .filter(|&id| id < active_id_at_start)
@@ -164,7 +164,7 @@ pub(crate) fn merge_with_hook(
     //    no-op in the common case where the active file already rotated
     //    past highest_output_id on its own (e.g. from puts during merge).
     {
-        let mut active_guard = active.write().unwrap();
+        let mut active_guard = active.lock().unwrap();
         if active_guard.file_id() <= highest_output_id {
             active_guard.sync()?;
             let new_id = next_file_id.fetch_add(1, Ordering::SeqCst);

@@ -3,6 +3,19 @@ name = "yabiir"
 version = "0.1.0"
 edition = "2024"
 description = "Yet another bitcask implementation in rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jfernand/yabiir"
+readme = "README.md"
+keywords = ["bitcask", "key-value", "storage-engine", "embedded-database"]
+categories = ["database-implementations", "filesystem"]
+# General Riak-ecosystem background reading, not specific to Bitcask itself
+# (unlike docs/papers/bitcask-intro.pdf, which the README links to directly)
+# — large and not needed to build or use this crate, so kept out of the
+# published package.
+exclude = [
+    "docs/papers/basho-relational-to-riak-whitepaper.pdf",
+    "docs/papers/dynamo-amazon-sosp2007.pdf",
+]
 
 [dependencies]
 crc32fast = "1.5.1"

@@ -172,6 +172,56 @@ fn sleep_or_stop(dur: Duration, stop: &AtomicBool) -> bool {
     stop.load(Ordering::Relaxed)
 }
 
+/// Drain every sample currently queued, recording each into `all_samples`
+/// (the running, all-time accumulator) and `csv` (if enabled), and return
+/// the drained window for the caller to additionally report on (e.g. a
+/// periodic print). Called both inside the periodic reporting loop and
+/// once more after the worker/merge threads are joined, since anything
+/// recorded after the loop's last drain but before those joins complete
+/// would otherwise never be recorded anywhere.
+fn drain_samples(
+    samples: &Mutex<Vec<Sample>>,
+    all_samples: &mut HashMap<OpKind, Vec<u64>>,
+    csv: &mut Option<BufWriter<File>>,
+) -> Vec<Sample> {
+    let window: Vec<Sample> = std::mem::take(&mut *samples.lock().unwrap());
+    for &(t, kind, ns) in &window {
+        all_samples.entry(kind).or_default().push(ns);
+        if let Some(w) = csv.as_mut() {
+            writeln!(w, "{t:.6},{},{ns}", kind.label()).unwrap();
+        }
+    }
+    window
+}
+
+/// Print one periodic report row per op kind present in `window`, labeled
+/// with `elapsed_secs` (seconds since the run started).
+fn print_window(window: &[Sample], elapsed_secs: f64) {
+    if window.is_empty() {
+        return;
+    }
+    let mut by_kind: HashMap<OpKind, Vec<u64>> = HashMap::new();
+    for &(_, kind, ns) in window {
+        by_kind.entry(kind).or_default().push(ns);
+    }
+    for kind in ALL_KINDS {
+        if let Some(v) = by_kind.get_mut(&kind) {
+            v.sort_unstable();
+            println!(
+                "{:>8.1}s {:>7} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}",
+                elapsed_secs,
+                kind.label(),
+                v.len(),
+                fmt_ns(percentile(v, 0.50)),
+                fmt_ns(percentile(v, 0.90)),
+                fmt_ns(percentile(v, 0.99)),
+                fmt_ns(percentile(v, 0.999)),
+                fmt_ns(*v.last().unwrap())
+            );
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -302,34 +352,8 @@ fn main() {
             eprintln!("--- warmup complete, recording ---");
         }
 
-        let window: Vec<Sample> = std::mem::take(&mut *samples.lock().unwrap());
-        if window.is_empty() {
-            continue;
-        }
-        let mut by_kind: HashMap<OpKind, Vec<u64>> = HashMap::new();
-        for &(t, kind, ns) in &window {
-            by_kind.entry(kind).or_default().push(ns);
-            all_samples.entry(kind).or_default().push(ns);
-            if let Some(w) = csv.as_mut() {
-                writeln!(w, "{t:.6},{},{ns}", kind.label()).unwrap();
-            }
-        }
-        for kind in ALL_KINDS {
-            if let Some(v) = by_kind.get_mut(&kind) {
-                v.sort_unstable();
-                println!(
-                    "{:>8.1}s {:>7} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}",
-                    overall_start.elapsed().as_secs_f64(),
-                    kind.label(),
-                    v.len(),
-                    fmt_ns(percentile(v, 0.50)),
-                    fmt_ns(percentile(v, 0.90)),
-                    fmt_ns(percentile(v, 0.99)),
-                    fmt_ns(percentile(v, 0.999)),
-                    fmt_ns(*v.last().unwrap())
-                );
-            }
-        }
+        let window = drain_samples(&samples, &mut all_samples, &mut csv);
+        print_window(&window, overall_start.elapsed().as_secs_f64());
     }
 
     stop.store(true, Ordering::Relaxed);
@@ -339,6 +363,14 @@ fn main() {
     if let Some(h) = merge_handle {
         h.join().unwrap();
     }
+    // One more drain: a worker's or the merge thread's final flush (its
+    // trailing local buffer, or a merge call still in flight when the
+    // reporting loop above took its last sleep) can land after that loop's
+    // last drain but before these joins complete — without this, that
+    // data (which, for a multi-second merge, can be the whole thing)
+    // would silently never make it into the CSV or the final summary.
+    let window = drain_samples(&samples, &mut all_samples, &mut csv);
+    print_window(&window, overall_start.elapsed().as_secs_f64());
     if let Some(w) = csv.as_mut() {
         w.flush().unwrap();
     }

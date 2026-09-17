@@ -123,7 +123,7 @@ impl ActiveFile {
 
     /// Read `len` bytes starting at `pos` from this file, without
     /// disturbing any other reader's position (positioned read, not
-    /// seek-then-read) — see [`pread_exact`].
+    /// seek-then-read) — see `pread_exact` below.
     pub fn read_at(&self, pos: u64, len: u32) -> io::Result<Vec<u8>> {
         pread_exact(&self.read_handle, pos, len)
     }

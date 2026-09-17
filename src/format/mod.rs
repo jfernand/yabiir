@@ -1,7 +1,7 @@
 //! On-disk entry and hint-file layout for Bitcask data files.
 //!
 //! This module is split into two submodules along the on-disk artifact each
-//! one governs — [`entry`] for `.bitcask.data` records and [`hint`] for
+//! one governs — `entry` for `.bitcask.data` records and `hint` for
 //! `.bitcask.hint` records — but both submodules are private and everything
 //! public is re-exported here, so callers only ever reach this as
 //! `format::...`, never `format::entry::...` or `format::hint::...`.
@@ -68,7 +68,7 @@ pub struct EntryHeader {
 
 /// Pack a real key length and the tombstone flag into one `u32`, per §1.2 of
 /// the implementation plan: the top bit is the flag, the low 31 bits are the
-/// key length. Shared by [`entry`] and [`hint`] since both formats encode
+/// key length. Shared by `entry` and `hint` since both formats encode
 /// `ksz` the same way.
 fn encode_ksz(key_len: u32, tombstone: bool) -> u32 {
     debug_assert!(

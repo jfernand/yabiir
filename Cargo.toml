@@ -32,6 +32,8 @@ path = "src/bin/kv.rs"
 [dev-dependencies]
 criterion = "0.8.2"
 proptest = "1"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [[bench]]
 name = "format"

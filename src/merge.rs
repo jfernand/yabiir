@@ -35,6 +35,35 @@
 //! read observe a renamed-but-not-yet-repointed file under stale keydir
 //! coordinates — not implemented here; flagged as a known limitation
 //! rather than worked around with an unproven fix.
+//!
+//! ## Batched flushing (found by profiling `loadtest` under `cargo flamegraph`)
+//!
+//! `ActiveFile::append` flushes on every call — required for `put`, since
+//! any other thread could `get()` that key immediately after `put()`
+//! returns. `MergeOutputWriter::write_live_entry` used to go through that
+//! same `append`, meaning a merge pass paid one flush syscall *per live
+//! entry it copied* — a real, measured cost (see `docs/` profiling notes)
+//! and a big share of why merge took over a second on a modest dataset.
+//!
+//! Merge doesn't need that per-entry: it writes, then compare-and-swaps the
+//! keydir, and nothing requires those two steps to be immediately adjacent
+//! — only that the repoint never happens before the bytes it points at are
+//! flushed. So `MergeOutputWriter` now writes through
+//! `ActiveFile::append_buffered` (no flush) and flushes once per batch
+//! ([`MERGE_FLUSH_BATCH_SIZE`] entries, or immediately at a rotation
+//! boundary, which already fsyncs). `merge_with_hook` defers each entry's
+//! keydir repoint into a `pending` list and only drains (applies) it once
+//! `write_live_entry` reports a flush actually happened — so a key is still
+//! never repointed before its bytes are visible to a fresh read, exactly
+//! the same guarantee as before, just satisfied once per batch instead of
+//! once per entry.
+//!
+//! This doesn't weaken crash safety: old input files are still only
+//! removed after `out.finish()` has fully flushed and fsynced every output
+//! file (§ above). Batching only changes how much of merge's own
+//! in-progress work is discarded and redone by the next attempt if the
+//! process crashes mid-merge — never the durability of data any `put`/
+//! `delete` call already returned `Ok` for.
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -103,6 +132,15 @@ pub(crate) fn merge_with_hook(
     //    forward only the live ones.
     let mut out = MergeOutputWriter::new(dir, next_file_id, max_file_size)?;
     let mut highest_output_id = out.current_file_id();
+    // Entries written but not yet repointed: write_live_entry batches its
+    // flushes (see this module's doc comment), so a key's bytes may not be
+    // durable-to-the-OS yet even though write_live_entry already returned.
+    // Drained (repointed) whenever a flush actually happens, and once more
+    // after out.finish() for whatever's left in the final partial batch —
+    // never repointing a key before its bytes are flushed, same guarantee
+    // as before, just satisfied once per batch instead of once per entry.
+    let mut pending: Vec<(Vec<u8>, KeydirEntry, KeydirEntry)> = Vec::new();
+
     for &file_id in &input_ids {
         let data_path = DataFileSet::data_path(dir, file_id);
         for (offset, entry) in read_all_entries(&data_path)? {
@@ -117,15 +155,15 @@ pub(crate) fn merge_with_hook(
                 continue;
             }
 
-            let (new_file_id, new_value_pos) = out.write_live_entry(&entry)?;
+            let (new_file_id, new_value_pos, flushed) = out.write_live_entry(&entry)?;
             highest_output_id = highest_output_id.max(out.current_file_id());
-            before_repoint(&entry.key);
 
             // 3. Repoint the keydir ONLY IF it still points at the exact
             //    (file_id, offset) we just copied — if a concurrent put()
             //    already overwrote this key while we were mid-merge, our
             //    copy is now stale and must NOT clobber the newer entry
-            //    (plan §7.3).
+            //    (plan §7.3). Queued here, applied once the batch covering
+            //    it is actually flushed, below.
             let old = KeydirEntry {
                 file_id,
                 value_sz: entry.header.value_sz,
@@ -138,14 +176,15 @@ pub(crate) fn merge_with_hook(
                 value_pos: new_value_pos,
                 tstamp: entry.header.tstamp,
             };
-            // Ignore a `false` return: it means a racing put already won,
-            // which is correct — our stale copy stays orphaned in the new
-            // file, never pointed to, and gets cleaned up by the *next*
-            // merge pass.
-            keydir.cas_repoint(&entry.key, old, new);
+            pending.push((entry.key, old, new));
+
+            if flushed {
+                apply_pending_repoints(keydir, &mut pending, &mut before_repoint);
+            }
         }
     }
-    out.finish()?;
+    out.finish()?; // flushes+fsyncs whatever's left in the final batch
+    apply_pending_repoints(keydir, &mut pending, &mut before_repoint);
 
     // 4. Remove the old input files now that nothing in the keydir points
     //    at them anymore: every key that was live in them now points at
@@ -173,6 +212,21 @@ pub(crate) fn merge_with_hook(
     }
 
     Ok(())
+}
+
+/// Drain and apply every queued repoint: for each, run the race-window hook
+/// then attempt the CAS. A `false` return from `cas_repoint` means a racing
+/// put already won — correct: that entry's copy stays orphaned in the new
+/// file, never pointed to, and gets cleaned up by the *next* merge pass.
+fn apply_pending_repoints(
+    keydir: &SharedKeydir,
+    pending: &mut Vec<(Vec<u8>, KeydirEntry, KeydirEntry)>,
+    before_repoint: &mut impl FnMut(&[u8]),
+) {
+    for (key, old, new) in pending.drain(..) {
+        before_repoint(&key);
+        keydir.cas_repoint(&key, old, new);
+    }
 }
 
 /// Sequentially scan `path` (an already-closed, immutable data file — never
@@ -213,17 +267,27 @@ fn read_all_entries(path: &Path) -> io::Result<Vec<(u64, Entry)>> {
     Ok(out)
 }
 
+/// How many live entries `MergeOutputWriter` writes before flushing, absent
+/// an earlier rotation boundary (which already flushes+fsyncs). See this
+/// module's doc comment on batched flushing for why this is safe.
+const MERGE_FLUSH_BATCH_SIZE: usize = 256;
+
 /// Writes merge output: a data file plus its companion hint file, rotating
 /// to `output_id, output_id+1, ...` on the same `max_file_size` threshold
 /// normal active files use. Reuses `ActiveFile` for the data-file side;
-/// doesn't touch the keydir itself — `merge` handles keydir updates
-/// per-entry (plan §7.4).
+/// doesn't touch the keydir itself — `merge` handles keydir updates,
+/// batched to line up with this writer's own flush batches (plan §7.4 and
+/// this module's doc comment on batched flushing).
 struct MergeOutputWriter<'a> {
     dir: &'a Path,
     next_file_id: &'a AtomicU32,
     max_file_size: u64,
     current_data: ActiveFile,
     current_hint: BufWriter<File>,
+    /// Live entries written since the last flush (via `write_unflushed`) —
+    /// reset on every flush, whether from hitting `MERGE_FLUSH_BATCH_SIZE`
+    /// or from a rotation boundary.
+    pending_since_flush: usize,
 }
 
 impl<'a> MergeOutputWriter<'a> {
@@ -235,6 +299,7 @@ impl<'a> MergeOutputWriter<'a> {
             max_file_size,
             current_data,
             current_hint,
+            pending_since_flush: 0,
         })
     }
 
@@ -252,15 +317,39 @@ impl<'a> MergeOutputWriter<'a> {
         self.current_data.file_id()
     }
 
-    fn write_live_entry(&mut self, entry: &Entry) -> io::Result<(u32, u64)> {
+    /// Writes one live entry (unflushed) plus its hint record, and rotates
+    /// or batch-flushes as needed. Returns `(file_id, value_pos, flushed)`
+    /// — `flushed` tells the caller whether this entry's bytes (and every
+    /// other still-pending entry's) are now safe to repoint in the keydir.
+    fn write_live_entry(&mut self, entry: &Entry) -> io::Result<(u32, u64, bool)> {
         let encoded = format::encode_entry(&entry.key, &entry.value, false, entry.header.tstamp);
-        let (file_id, value_pos, _total_len) = self.current_data.append(&encoded)?;
+        let (file_id, value_pos, _total_len) = self.current_data.append_buffered(&encoded)?;
         let hint = format::encode_hint(&entry.key, &entry.header, value_pos);
         self.current_hint.write_all(hint.as_bytes())?;
-        if self.current_data.len() >= self.max_file_size {
-            self.rotate()?;
-        }
-        Ok((file_id, value_pos))
+        self.pending_since_flush += 1;
+
+        let flushed = if self.current_data.len() >= self.max_file_size {
+            self.rotate()?; // fsyncs — a strictly stronger guarantee than a flush
+            true
+        } else if self.pending_since_flush >= MERGE_FLUSH_BATCH_SIZE {
+            self.flush_batch()?;
+            true
+        } else {
+            false
+        };
+
+        Ok((file_id, value_pos, flushed))
+    }
+
+    /// A plain flush (not fsync) — same durability step `rotate`/`finish`
+    /// do, just without also syncing to disk, since a batch boundary only
+    /// needs to make bytes visible to a fresh read, not survive a crash any
+    /// more than the rest of this design already promises without
+    /// `sync_on_put`.
+    fn flush_batch(&mut self) -> io::Result<()> {
+        self.current_data.flush_only()?;
+        self.pending_since_flush = 0;
+        Ok(())
     }
 
     fn rotate(&mut self) -> io::Result<()> {
@@ -269,6 +358,7 @@ impl<'a> MergeOutputWriter<'a> {
         let (data, hint) = Self::open_output(self.dir, self.next_file_id)?;
         self.current_data = data;
         self.current_hint = hint;
+        self.pending_since_flush = 0;
         Ok(())
     }
 

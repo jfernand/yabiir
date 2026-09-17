@@ -58,26 +58,48 @@ impl ActiveFile {
         self.file_id
     }
 
-    /// Append one pre-encoded entry. Returns `(file_id, value_pos,
-    /// entry_total_len)` — `value_pos` is where the *value* bytes start
-    /// within the file (past the header and key), which is exactly what
-    /// the keydir stores and what reads seek/pread from directly.
-    ///
-    /// Flushes the `BufWriter` before returning (a `write` syscall, not a
-    /// fsync) — necessary, not just an optimization detail: `read_at` reads
-    /// through a *separate* raw file handle that bypasses this buffer, so
-    /// without flushing here, a `read_at` for bytes still sitting in
-    /// userspace would see a short/stale file and fail. `sync` (fsync) is
-    /// still a separate, more expensive durability step, gated by
-    /// `Options::sync_on_put` at the engine level.
-    pub fn append(&mut self, encoded: &EncodedEntry) -> io::Result<(u32, u64, u64)> {
+    /// Write one pre-encoded entry into the buffer, without flushing.
+    /// Returns `(file_id, value_pos, entry_total_len)` — `value_pos` is
+    /// where the *value* bytes start within the file (past the header and
+    /// key), which is exactly what the keydir stores and what reads
+    /// seek/pread from directly.
+    fn write_unflushed(&mut self, encoded: &EncodedEntry) -> io::Result<(u32, u64, u64)> {
         let bytes = encoded.as_bytes();
         self.writer.write_all(bytes)?;
-        self.writer.flush()?;
         let total_len = bytes.len() as u64;
         let value_pos = self.offset + (total_len - encoded.value_len() as u64);
         self.offset += total_len;
         Ok((self.file_id, value_pos, total_len))
+    }
+
+    /// Append one pre-encoded entry and flush before returning (a `write`
+    /// syscall, not a fsync) — necessary, not just an optimization detail:
+    /// `read_at` reads through a *separate* raw file handle that bypasses
+    /// this buffer, so without flushing here, a `read_at` for bytes still
+    /// sitting in userspace would see a short/stale file and fail. `sync`
+    /// (fsync) is still a separate, more expensive durability step, gated
+    /// by `Options::sync_on_put` at the engine level.
+    pub fn append(&mut self, encoded: &EncodedEntry) -> io::Result<(u32, u64, u64)> {
+        let result = self.write_unflushed(encoded)?;
+        self.writer.flush()?;
+        Ok(result)
+    }
+
+    /// Same as [`Self::append`], but does *not* flush. For callers that
+    /// intentionally batch several writes before flushing once (merge's
+    /// output writer) — the caller takes on responsibility for calling
+    /// [`Self::flush_only`] before any reader could observe these bytes,
+    /// i.e. before publishing their location anywhere (a keydir repoint).
+    pub(crate) fn append_buffered(&mut self, encoded: &EncodedEntry) -> io::Result<(u32, u64, u64)> {
+        self.write_unflushed(encoded)
+    }
+
+    /// Flush buffered writes to the OS (a `write` syscall, not a fsync) —
+    /// the same step `append` does internally, exposed separately so a
+    /// caller using [`Self::append_buffered`] can flush once per batch
+    /// instead of once per entry.
+    pub(crate) fn flush_only(&mut self) -> io::Result<()> {
+        self.writer.flush()
     }
 
     /// Flush buffered writes and fsync the file's data (not metadata —

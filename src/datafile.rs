@@ -110,6 +110,20 @@ impl ActiveFile {
         self.writer.get_ref().sync_data()
     }
 
+    /// Flush buffered writes, then return an independent clone of this
+    /// file's descriptor for a caller to `sync_data()` on its own, without
+    /// holding this `ActiveFile` (or whatever lock guards it) for the
+    /// duration of that fsync call — used by group commit (`src/commit.rs`)
+    /// so the shared fsync for a batch of writers doesn't block unrelated
+    /// threads from appending while it's in flight. `fsync` targets the
+    /// underlying file at the OS/inode level, not a particular file
+    /// descriptor, so a clone fsyncs exactly the same on-disk bytes this
+    /// handle would.
+    pub(crate) fn sync_handle(&mut self) -> io::Result<File> {
+        self.writer.flush()?;
+        self.writer.get_ref().try_clone()
+    }
+
     /// Current end-of-file / next append position. Used by the write path
     /// to decide when to rotate (plan §3.4 — rotation itself is a
     /// write-path concern, not implemented here).

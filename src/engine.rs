@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::{Bitcask, Options};
+use crate::commit::GroupCommit;
 use crate::datafile::{ActiveFile, DataFileSet};
 use crate::error::{Error, Result};
 use crate::format;
@@ -34,6 +35,12 @@ pub struct Engine {
     /// so a plain `Mutex` is all that's needed; there's no reader side left
     /// for `RwLock` to buy anything over `Mutex`.
     active: Option<Mutex<ActiveFile>>,
+    /// Coordinates `sync_on_put`'s fsync across concurrent writers so they
+    /// share one fsync instead of each paying for their own — see
+    /// `src/commit.rs` and `docs/group-commit.typ`. Created unconditionally
+    /// (even when `sync_on_put` is off) since it's cheap and keeps `append`
+    /// simple; only ever touched when `sync_on_put` is set.
+    group_commit: GroupCommit,
     next_file_id: AtomicU32,
     opts: Options,
     /// Held for the lifetime of a `read_write` handle; releases the OS
@@ -59,17 +66,40 @@ impl Engine {
     /// call `require_write` first — `self.active` being `None` here would
     /// mean one of them didn't, so this treats that as the same
     /// [`Error::ReadOnly`] rather than panicking, defensively.
+    ///
+    /// The write itself (and rotation, if the size threshold was crossed)
+    /// happens under `active`'s lock, exactly as before group commit
+    /// existed. What changed is the `sync_on_put` fsync: instead of every
+    /// caller fsync-ing its own write, it's requested via
+    /// `self.group_commit` *after* releasing the lock, so several callers
+    /// that arrive close together can share one fsync — see
+    /// `src/commit.rs`. Rotation's own fsync (unconditional, regardless of
+    /// `sync_on_put`) already makes everything appended before it durable,
+    /// so it reports that to the coordinator too, rather than leaving a
+    /// writer who landed just before a rotation waiting on an unrelated
+    /// fsync of the *new* active file.
     fn append(&self, encoded: &format::EncodedEntry) -> Result<(u32, u64)> {
         let active_lock = self.active.as_ref().ok_or(Error::ReadOnly)?;
-        let mut active = active_lock.lock().unwrap();
-        let (file_id, value_pos, _total_len) = active.append(encoded)?;
+        let (file_id, value_pos, target_gen) = {
+            let mut active = active_lock.lock().unwrap();
+            let (file_id, value_pos, _total_len) = active.append(encoded)?;
+            let target_gen = self.group_commit.record_pending();
+            if active.len() >= self.opts.max_file_size {
+                active.sync()?;
+                self.group_commit.mark_all_durable();
+                let new_id = self.next_file_id.fetch_add(1, Ordering::SeqCst);
+                *active = ActiveFile::create(&self.dir, new_id)?;
+            }
+            (file_id, value_pos, target_gen)
+        };
+
         if self.opts.sync_on_put {
-            active.sync()?;
-        }
-        if active.len() >= self.opts.max_file_size {
-            active.sync()?;
-            let new_id = self.next_file_id.fetch_add(1, Ordering::SeqCst);
-            *active = ActiveFile::create(&self.dir, new_id)?;
+            self.group_commit.commit(target_gen, || {
+                let mut active = active_lock.lock().unwrap();
+                let fd = active.sync_handle()?;
+                drop(active); // don't hold the append lock across the fsync itself
+                fd.sync_data()
+            })?;
         }
         Ok((file_id, value_pos))
     }
@@ -97,6 +127,15 @@ impl Engine {
     /// deterministically pause merge right before it repoints a specific
     /// key's keydir entry, to exercise the plan §7.3 race without relying
     /// on timing.
+    /// Test-only: how many real fsyncs `sync_on_put`'s group-commit
+    /// coordinator has actually performed so far — used to verify batching
+    /// is really happening under concurrent load, not just that results are
+    /// correct.
+    #[cfg(test)]
+    fn group_commit_fsync_calls(&self) -> usize {
+        self.group_commit.fsync_call_count()
+    }
+
     #[cfg(test)]
     fn merge_with_hook(&self, hook: impl FnMut(&[u8])) -> Result<()> {
         self.require_write()?;
@@ -106,6 +145,7 @@ impl Engine {
             &self.keydir,
             &self.files,
             active_lock,
+            &self.group_commit,
             &self.next_file_id,
             self.opts.max_file_size,
             hook,
@@ -153,6 +193,7 @@ impl Bitcask for Engine {
             dir,
             keydir: SharedKeydir::new(keydir),
             active,
+            group_commit: GroupCommit::new(),
             next_file_id: AtomicU32::new(next_id + 1),
             opts,
             _write_lock: write_lock,
@@ -229,6 +270,7 @@ impl Bitcask for Engine {
             &self.keydir,
             &self.files,
             active_lock,
+            &self.group_commit,
             &self.next_file_id,
             self.opts.max_file_size,
         )
@@ -533,6 +575,72 @@ mod tests {
         merger.join().unwrap();
 
         assert_eq!(db.get(b"K").unwrap(), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn sync_on_put_round_trips_correctly() {
+        let dir = TempDir::new();
+        let db = Engine::open(
+            &*dir,
+            Options {
+                sync_on_put: true,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        db.put(b"k", b"v1").unwrap();
+        db.put(b"k", b"v2").unwrap();
+        db.delete(b"k").unwrap();
+        db.put(b"k2", b"v").unwrap();
+        assert_eq!(db.get(b"k").unwrap(), None);
+        assert_eq!(db.get(b"k2").unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// The point of group commit: several `sync_on_put` writers that arrive
+    /// concurrently should share a small number of real fsyncs, not pay one
+    /// each. Deterministic (not timing-based): a first "opener" write is
+    /// done and fully returns before starting the batch, so the batch's
+    /// fsyncs are counted in isolation; many threads then `put` at once and
+    /// the fsync count afterward must be far below the writer count.
+    #[test]
+    fn concurrent_sync_on_put_writers_share_fsyncs() {
+        let dir = TempDir::new();
+        let db = std::sync::Arc::new(
+            Engine::open(
+                &*dir,
+                Options {
+                    sync_on_put: true,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+        db.put(b"warmup", b"v").unwrap();
+        let before = db.group_commit_fsync_calls();
+
+        let n = 32usize;
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let db = std::sync::Arc::clone(&db);
+                std::thread::spawn(move || {
+                    db.put(format!("k{i}").as_bytes(), b"v").unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let after = db.group_commit_fsync_calls();
+        let fsyncs_for_batch = after - before;
+        assert!(
+            fsyncs_for_batch >= 1 && fsyncs_for_batch < n,
+            "expected the {n} concurrent writers to share well under {n} fsyncs, got {fsyncs_for_batch}"
+        );
+
+        for i in 0..n {
+            assert_eq!(db.get(format!("k{i}").as_bytes()).unwrap(), Some(b"v".to_vec()));
+        }
     }
 
     /// Plan §8.3: a second `read_write` handle on a directory that already

@@ -71,6 +71,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::commit::GroupCommit;
 use crate::datafile::{ActiveFile, DataFileSet};
 use crate::error::Result;
 use crate::format::{self, Entry, EntryRead};
@@ -92,10 +93,20 @@ pub fn merge(
     keydir: &SharedKeydir,
     files: &DataFileSet,
     active: &Mutex<ActiveFile>,
+    group_commit: &GroupCommit,
     next_file_id: &AtomicU32,
     max_file_size: u64,
 ) -> Result<()> {
-    merge_with_hook(dir, keydir, files, active, next_file_id, max_file_size, |_| {})
+    merge_with_hook(
+        dir,
+        keydir,
+        files,
+        active,
+        group_commit,
+        next_file_id,
+        max_file_size,
+        |_| {},
+    )
 }
 
 /// Same as [`merge`], plus a hook invoked for every live entry right after
@@ -105,11 +116,17 @@ pub fn merge(
 /// (via `Engine`'s `#[cfg(test)]` forwarding method) to deterministically
 /// pause merge mid-repoint and inject a concurrent write, rather than
 /// relying on timing.
+// One parameter over clippy's default threshold, all engine fields passed
+// through individually (see the doc comment above) rather than bundled into
+// a context struct — not worth the extra indirection for a `pub(crate)`,
+// two-caller function.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn merge_with_hook(
     dir: &Path,
     keydir: &SharedKeydir,
     files: &DataFileSet,
     active: &Mutex<ActiveFile>,
+    group_commit: &GroupCommit,
     next_file_id: &AtomicU32,
     max_file_size: u64,
     mut before_repoint: impl FnMut(&[u8]),
@@ -206,6 +223,7 @@ pub(crate) fn merge_with_hook(
         let mut active_guard = active.lock().unwrap();
         if active_guard.file_id() <= highest_output_id {
             active_guard.sync()?;
+            group_commit.mark_all_durable();
             let new_id = next_file_id.fetch_add(1, Ordering::SeqCst);
             *active_guard = ActiveFile::create(dir, new_id)?;
         }

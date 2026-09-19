@@ -94,7 +94,7 @@ impl GroupCommit {
         let mut state = self
             .state
             .lock()
-            .unwrap(); // TODO
+            .expect("Sync state data structure is no loner safe (mutex poisoned); exiting");
         state.max_durable_generation = state.pending_writes; // pending_writes == last recorded generation
         self.cond_var
             .notify_all(); // wakey, wakey, all threads waiting for me
@@ -127,7 +127,7 @@ impl GroupCommit {
                 state = self
                     .state
                     .lock()
-                    .unwrap();
+                    .expect("Sync state data structure is no loner safe (mutex poisoned); exiting");
                 state.is_syncing = false;
                 if result.is_ok() {
                     state.max_durable_generation = state
@@ -142,7 +142,7 @@ impl GroupCommit {
                 state = self
                     .cond_var
                     .wait(state)
-                    .unwrap();
+                    .expect("Thread synchronization is no loner safe (condition variable poisoned); exiting");
             }
         }
     }

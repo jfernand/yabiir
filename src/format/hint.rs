@@ -3,7 +3,7 @@
 
 use std::io::{self, Read};
 
-use super::{EntryHeader, decode_ksz, encode_ksz, read_up_to};
+use super::{EntryHeader, decode_key_size, encode_key_size, read_up_to};
 
 pub const HINT_HEADER_SIZE: usize = 20;
 
@@ -46,7 +46,7 @@ impl AsRef<[u8]> for EncodedHint {
 /// Encode one hint-file record for `key`, whose data-file entry has the
 /// given header and whose value starts at `value_pos` in the data file.
 pub fn encode_hint(key: &[u8], header: &EntryHeader, value_pos: u64) -> EncodedHint {
-    let ksz_and_flags = encode_ksz(header.key_size, header.tombstone);
+    let ksz_and_flags = encode_key_size(header.key_size, header.tombstone);
     let mut buf = Vec::with_capacity(HINT_HEADER_SIZE + key.len());
     buf.extend_from_slice(
         &header
@@ -86,7 +86,7 @@ pub fn decode_hint_header(buf: &[u8; HINT_HEADER_SIZE]) -> (EntryHeader, u64) {
             .try_into()
             .unwrap(),
     );
-    let (ksz, tombstone) = decode_ksz(ksz_and_flags);
+    let (ksz, tombstone) = decode_key_size(ksz_and_flags);
     (
         EntryHeader {
             timestamp: tstamp,

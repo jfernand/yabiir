@@ -138,7 +138,7 @@ pub(crate) fn merge_with_hook(
     //    merge. Safe and simple (plan §7.2 step 1).
     let active_id_at_start = active
         .lock()
-        .unwrap()
+        .expect("Active file access no loner safe (mutex poisoned); exiting")
         .file_id();
     let input_ids: Vec<u32> = DataFileSet::discover(dir)?
         .into_iter()
@@ -240,7 +240,7 @@ pub(crate) fn merge_with_hook(
     {
         let mut active_guard = active
             .lock()
-            .unwrap();
+            .expect("Active file access no loner safe (mutex poisoned); exiting");
         if active_guard.file_id() <= highest_output_id {
             active_guard.sync()?;
             group_commit.mark_all_durable();

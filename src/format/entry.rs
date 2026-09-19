@@ -3,7 +3,7 @@
 
 use std::io::{self, Read};
 
-use super::{EntryHeader, decode_ksz, encode_ksz, read_up_to};
+use super::{EntryHeader, decode_key_size, encode_key_size, read_up_to};
 
 pub const HEADER_SIZE: usize = 16;
 
@@ -72,7 +72,7 @@ impl AsRef<[u8]> for EncodedEntry {
 /// away, which the caller must not rely on — validate key length before
 /// calling this in the engine layer.
 pub fn encode_entry(key: &[u8], value: &[u8], tombstone: bool, tstamp: u32) -> EncodedEntry {
-    let ksz_and_flags = encode_ksz(key.len() as u32, tombstone);
+    let ksz_and_flags = encode_key_size(key.len() as u32, tombstone);
     let value_sz = value.len() as u32;
 
     let mut buf = Vec::with_capacity(HEADER_SIZE + key.len() + value.len());
@@ -114,7 +114,7 @@ pub fn decode_entry_header(buf: &[u8; HEADER_SIZE]) -> (u32, EntryHeader) {
             .try_into()
             .unwrap(),
     );
-    let (ksz, tombstone) = decode_ksz(ksz_and_flags);
+    let (ksz, tombstone) = decode_key_size(ksz_and_flags);
     (
         crc,
         EntryHeader {

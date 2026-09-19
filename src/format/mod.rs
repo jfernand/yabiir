@@ -70,7 +70,7 @@ pub struct EntryHeader {
 /// the implementation plan: the top bit is the flag, the low 31 bits are the
 /// key length. Shared by `entry` and `hint` since both formats encode
 /// `ksz` the same way.
-fn encode_ksz(key_len: u32, tombstone: bool) -> u32 {
+fn encode_key_size(key_len: u32, tombstone: bool) -> u32 {
     debug_assert!(
         key_len <= MAX_KEY_LEN,
         "key too large ({key_len} bytes, max {MAX_KEY_LEN})"
@@ -78,8 +78,8 @@ fn encode_ksz(key_len: u32, tombstone: bool) -> u32 {
     key_len | if tombstone { TOMBSTONE_BIT } else { 0 }
 }
 
-/// Inverse of [`encode_ksz`].
-fn decode_ksz(raw: u32) -> (u32, bool) {
+/// Inverse of [`encode_key_size`].
+fn decode_key_size(raw: u32) -> (u32, bool) {
     (raw & KEYSIZE_MASK, raw & TOMBSTONE_BIT != 0)
 }
 
@@ -105,14 +105,14 @@ mod tests {
 
     #[test]
     fn ksz_flag_round_trip() {
-        assert_eq!(decode_ksz(encode_ksz(0, false)), (0, false));
-        assert_eq!(decode_ksz(encode_ksz(0, true)), (0, true));
+        assert_eq!(decode_key_size(encode_key_size(0, false)), (0, false));
+        assert_eq!(decode_key_size(encode_key_size(0, true)), (0, true));
         assert_eq!(
-            decode_ksz(encode_ksz(MAX_KEY_LEN, false)),
+            decode_key_size(encode_key_size(MAX_KEY_LEN, false)),
             (MAX_KEY_LEN, false)
         );
         assert_eq!(
-            decode_ksz(encode_ksz(MAX_KEY_LEN, true)),
+            decode_key_size(encode_key_size(MAX_KEY_LEN, true)),
             (MAX_KEY_LEN, true)
         );
     }

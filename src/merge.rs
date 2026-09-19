@@ -590,7 +590,7 @@ mod tests {
         let reopened = Engine::open(
             &*dir,
             Options {
-                read_write: false,
+                is_read_write: false,
                 ..Options::default()
             },
         )

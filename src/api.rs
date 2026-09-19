@@ -11,9 +11,9 @@ pub struct Options {
     /// Open for reading and writing (`true`) or read-only (`false`).
     /// Only one `read_write` handle may be open on a given directory at a
     /// time, enforced via a process-level directory lock.
-    pub read_write: bool,
+    pub is_read_write: bool,
     /// Fsync the active file after every `put`/`delete`. Safer, slower.
-    pub sync_on_put: bool,
+    pub should_sync_on_put: bool,
     /// Size (bytes) at which the active file is rotated and a new one
     /// started.
     pub max_file_size: u64,
@@ -22,8 +22,8 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            read_write: true,
-            sync_on_put: false,
+            is_read_write: true,
+            should_sync_on_put: false,
             max_file_size: 64 * 1024 * 1024,
         }
     }

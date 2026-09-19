@@ -42,33 +42,33 @@ use std::sync::{Condvar, Mutex};
 
 pub(crate) struct GroupCommit {
     state: Mutex<State>,
-    cv: Condvar,
+    cond_var: Condvar,
     /// Number of times `do_fsync` was actually invoked (i.e. this thread
     /// became leader for its round) — exposed for tests/verification, not
     /// used by the coordination logic itself.
-    fsync_calls: AtomicUsize,
+    n_fsync_calls: AtomicUsize,
 }
 
 struct State {
     /// Total writes recorded so far via `record_pending`, monotonically
     /// increasing.
-    pending: u64,
+    pending_writes: u64,
     /// The highest generation number known to be durable.
-    durable: u64,
+    max_durable_generation: u64,
     /// Whether some thread is currently running a fsync for this coordinator.
-    syncing: bool,
+    is_syncing: bool,
 }
 
 impl GroupCommit {
     pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(State {
-                pending: 0,
-                durable: 0,
-                syncing: false,
+                pending_writes: 0,
+                max_durable_generation: 0,
+                is_syncing: false,
             }),
-            cv: Condvar::new(),
-            fsync_calls: AtomicUsize::new(0),
+            cond_var: Condvar::new(),
+            n_fsync_calls: AtomicUsize::new(0),
         }
     }
 
@@ -77,9 +77,9 @@ impl GroupCommit {
     /// so the generation numbers handed out reflect real append order.
     /// Returns the generation this write must see covered by `commit`.
     pub(crate) fn record_pending(&self) -> u64 {
-        let mut state = self.state.lock().unwrap();
-        state.pending += 1;
-        state.pending
+        let mut state = self.state.lock().unwrap(); // TODO
+        state.pending_writes += 1;
+        state.pending_writes
     }
 
     /// Record that every write appended so far is now durable via some
@@ -88,9 +88,9 @@ impl GroupCommit {
     /// same append lock `record_pending` was called under for the writes
     /// it's meant to cover.
     pub(crate) fn mark_all_durable(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.durable = state.pending;
-        self.cv.notify_all();
+        let mut state = self.state.lock().unwrap(); // TODO
+        state.max_durable_generation = state.pending_writes; // pending_writes == last recorded generation
+        self.cond_var.notify_all(); // wakey, wakey, all threads waiting for me
     }
 
     /// Block until `target_gen` is durable. If no fsync is currently in
@@ -99,37 +99,37 @@ impl GroupCommit {
     /// whichever thread is already leading.
     pub(crate) fn commit(
         &self,
-        target_gen: u64,
+        target_generation: u64,
         do_fsync: impl Fn() -> io::Result<()>,
     ) -> io::Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap(); // TODO
         loop {
-            if state.durable >= target_gen {
+            if state.max_durable_generation >= target_generation {
                 return Ok(());
             }
-            if !state.syncing {
-                state.syncing = true;
-                let covers_up_to = state.pending;
+            if !state.is_syncing {
+                state.is_syncing = true;
+                let covers_up_to = state.pending_writes;
                 drop(state);
                 let result = do_fsync();
-                self.fsync_calls.fetch_add(1, Ordering::Relaxed);
+                self.n_fsync_calls.fetch_add(1, Ordering::Relaxed);
                 state = self.state.lock().unwrap();
-                state.syncing = false;
+                state.is_syncing = false;
                 if result.is_ok() {
-                    state.durable = state.durable.max(covers_up_to);
+                    state.max_durable_generation = state.max_durable_generation.max(covers_up_to);
                 }
-                self.cv.notify_all();
+                self.cond_var.notify_all();
                 result?;
                 // loop: re-check state.durable >= target_gen above
             } else {
-                state = self.cv.wait(state).unwrap();
+                state = self.cond_var.wait(state).unwrap();
             }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn fsync_call_count(&self) -> usize {
-        self.fsync_calls.load(Ordering::Relaxed)
+        self.n_fsync_calls.load(Ordering::Relaxed)
     }
 }
 

@@ -124,42 +124,42 @@ impl SharedKeydir {
     pub fn get(&self, key: &[u8]) -> Option<KeydirEntry> {
         self.0
             .read()
-            .unwrap()
+            .expect("Key directory data structure no longer safe (RW lock poisoned); exiting")
             .get(key)
     }
 
     pub fn insert(&self, key: &[u8], entry: KeydirEntry) {
         self.0
             .write()
-            .unwrap()
+            .expect("Key directory data structure no longer safe (RW lock poisoned); exiting")
             .insert(key, entry);
     }
 
     pub fn remove(&self, key: &[u8]) -> Option<KeydirEntry> {
         self.0
             .write()
-            .unwrap()
+            .expect("Key directory data structure no longer safe (RW lock poisoned); exiting")
             .remove(key)
     }
 
     pub fn len(&self) -> usize {
         self.0
             .read()
-            .unwrap()
+            .expect("Key directory data structure no longer safe (RW lock poisoned); exiting")
             .len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.0
             .read()
-            .unwrap()
+            .expect("Key directory data structure no longer safe (RW lock poisoned); exiting")
             .is_empty()
     }
 
     pub fn cas_repoint(&self, key: &[u8], expected_old: KeydirEntry, new: KeydirEntry) -> bool {
         self.0
             .write()
-            .unwrap()
+            .expect("Key directory data structure no longer safe (RW lock poisoned); exiting")
             .cas_repoint(key, expected_old, new)
     }
 
@@ -171,7 +171,7 @@ impl SharedKeydir {
     pub fn snapshot(&self) -> Vec<(Box<[u8]>, KeydirEntry)> {
         self.0
             .read()
-            .unwrap()
+            .expect("Key directory data structure no longer safe (RW lock poisoned); exiting")
             .iter()
             .map(|(k, v)| (Box::<[u8]>::from(k), *v))
             .collect()

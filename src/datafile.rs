@@ -44,7 +44,9 @@ impl ActiveFile {
         // Normally 0 for a brand-new file; reading it back from the file's
         // actual length rather than assuming 0 means this would also do
         // the right thing if ever pointed at a pre-existing file.
-        let offset = file.metadata()?.len();
+        let offset = file
+            .metadata()?
+            .len();
         let read_handle = file.try_clone()?;
         Ok(Self {
             file_id,
@@ -65,7 +67,8 @@ impl ActiveFile {
     /// seek/pread from directly.
     fn write_unflushed(&mut self, encoded: &EncodedEntry) -> io::Result<(u32, u64, u64)> {
         let bytes = encoded.as_bytes();
-        self.writer.write_all(bytes)?;
+        self.writer
+            .write_all(bytes)?;
         let total_len = bytes.len() as u64;
         let value_pos = self.offset + (total_len - encoded.value_len() as u64);
         self.offset += total_len;
@@ -81,7 +84,8 @@ impl ActiveFile {
     /// by `Options::sync_on_put` at the engine level.
     pub fn append(&mut self, encoded: &EncodedEntry) -> io::Result<(u32, u64, u64)> {
         let result = self.write_unflushed(encoded)?;
-        self.writer.flush()?;
+        self.writer
+            .flush()?;
         Ok(result)
     }
 
@@ -90,7 +94,10 @@ impl ActiveFile {
     /// output writer) — the caller takes on responsibility for calling
     /// [`Self::flush_only`] before any reader could observe these bytes,
     /// i.e. before publishing their location anywhere (a keydir repoint).
-    pub(crate) fn append_buffered(&mut self, encoded: &EncodedEntry) -> io::Result<(u32, u64, u64)> {
+    pub(crate) fn append_buffered(
+        &mut self,
+        encoded: &EncodedEntry,
+    ) -> io::Result<(u32, u64, u64)> {
         self.write_unflushed(encoded)
     }
 
@@ -99,15 +106,19 @@ impl ActiveFile {
     /// caller using [`Self::append_buffered`] can flush once per batch
     /// instead of once per entry.
     pub(crate) fn flush_only(&mut self) -> io::Result<()> {
-        self.writer.flush()
+        self.writer
+            .flush()
     }
 
     /// Flush buffered writes and fsync the file's data (not metadata —
     /// `sync_data`, cheaper than `sync_all`, is enough since we only need
     /// the bytes durable, not e.g. mtime).
     pub fn sync(&mut self) -> io::Result<()> {
-        self.writer.flush()?;
-        self.writer.get_ref().sync_data()
+        self.writer
+            .flush()?;
+        self.writer
+            .get_ref()
+            .sync_data()
     }
 
     /// Flush buffered writes, then return an independent clone of this
@@ -120,8 +131,11 @@ impl ActiveFile {
     /// descriptor, so a clone fsyncs exactly the same on-disk bytes this
     /// handle would.
     pub(crate) fn sync_handle(&mut self) -> io::Result<File> {
-        self.writer.flush()?;
-        self.writer.get_ref().try_clone()
+        self.writer
+            .flush()?;
+        self.writer
+            .get_ref()
+            .try_clone()
     }
 
     /// Current end-of-file / next append position. Used by the write path
@@ -169,7 +183,10 @@ impl DataFileSet {
         let mut ids = Vec::new();
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
-            if let Some(name) = entry.file_name().to_str() {
+            if let Some(name) = entry
+                .file_name()
+                .to_str()
+            {
                 if let Some(id) = parse_data_file_id(name) {
                     ids.push(id);
                 }
@@ -194,7 +211,10 @@ impl DataFileSet {
     /// each other (plan §8.2).
     pub fn read_at(&self, file_id: u32, pos: u64, len: u32) -> io::Result<Vec<u8>> {
         let file = {
-            let mut readers = self.readers.lock().unwrap();
+            let mut readers = self
+                .readers
+                .lock()
+                .expect("Data file access no loner safe (mutex poisoned); exiting");
             if let Some(f) = readers.get(&file_id) {
                 Arc::clone(f)
             } else {
@@ -214,16 +234,24 @@ impl DataFileSet {
     /// "never evict" was written before merge existed to ever remove
     /// files; this is the one place that assumption needs an exception).
     pub fn forget(&self, file_id: u32) {
-        self.readers.lock().unwrap().remove(&file_id);
+        self.readers
+            .lock()
+            .expect("Active file access no loner safe (mutex poisoned); exiting")
+            .remove(&file_id);
     }
 }
 
 fn parse_data_file_id(name: &str) -> Option<u32> {
     let stem = name.strip_suffix(".bitcask.data")?;
-    if stem.len() != 20 || !stem.bytes().all(|b| b.is_ascii_digit()) {
+    if stem.len() != 20
+        || !stem
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+    {
         return None;
     }
-    stem.parse().ok()
+    stem.parse()
+        .ok()
 }
 
 /// Positioned read (`pread`): reads `len` bytes starting at `pos` without
@@ -298,17 +326,24 @@ mod tests {
         let mut locations = Vec::new();
         for (key, value) in &cases {
             let encoded = format::encode_entry(key, value, false, 0);
-            let (file_id, value_pos, _total_len) = active.append(&encoded).unwrap();
+            let (file_id, value_pos, _total_len) = active
+                .append(&encoded)
+                .unwrap();
             locations.push((file_id, value_pos, value.len() as u32));
         }
-        active.sync().unwrap();
+        active
+            .sync()
+            .unwrap();
         drop(active); // now immutable
 
         let files = DataFileSet::new(&*dir);
-        for ((file_id, value_pos, value_len), (_, expected_value)) in
-            locations.iter().zip(cases.iter())
+        for ((file_id, value_pos, value_len), (_, expected_value)) in locations
+            .iter()
+            .zip(cases.iter())
         {
-            let read = files.read_at(*file_id, *value_pos, *value_len).unwrap();
+            let read = files
+                .read_at(*file_id, *value_pos, *value_len)
+                .unwrap();
             assert_eq!(&read, expected_value);
         }
     }
@@ -325,18 +360,27 @@ mod tests {
             let key = format!("key-{i}");
             let value = vec![b'x'; 20];
             let encoded = format::encode_entry(key.as_bytes(), &value, false, 0);
-            active.append(&encoded).unwrap();
+            active
+                .append(&encoded)
+                .unwrap();
             if active.len() >= threshold {
-                active.sync().unwrap();
+                active
+                    .sync()
+                    .unwrap();
                 file_id += 1;
                 active = ActiveFile::create(&dir, file_id).unwrap();
                 rotations += 1;
             }
         }
-        active.sync().unwrap();
+        active
+            .sync()
+            .unwrap();
         drop(active);
 
-        assert!(rotations >= 3, "expected several rotations, got {rotations}");
+        assert!(
+            rotations >= 3,
+            "expected several rotations, got {rotations}"
+        );
 
         let ids = DataFileSet::discover(&dir).unwrap();
         let expected: Vec<u32> = (1..=file_id).collect();
@@ -363,10 +407,14 @@ mod tests {
         for i in 0..64u32 {
             let value = vec![(i % 256) as u8; 37]; // distinct-ish content per index
             let encoded = format::encode_entry(format!("k{i}").as_bytes(), &value, false, 0);
-            let (file_id, value_pos, _) = active.append(&encoded).unwrap();
+            let (file_id, value_pos, _) = active
+                .append(&encoded)
+                .unwrap();
             locations.push((file_id, value_pos, value));
         }
-        active.sync().unwrap();
+        active
+            .sync()
+            .unwrap();
         drop(active);
 
         let files = Arc::new(DataFileSet::new(&*dir));
@@ -377,7 +425,10 @@ mod tests {
                 let files = Arc::clone(&files);
                 let locations = Arc::clone(&locations);
                 thread::spawn(move || {
-                    for (idx, (file_id, value_pos, expected)) in locations.iter().enumerate() {
+                    for (idx, (file_id, value_pos, expected)) in locations
+                        .iter()
+                        .enumerate()
+                    {
                         if idx as u32 % 8 != t {
                             continue; // spread work across threads, all hitting the same file_id
                         }
@@ -390,7 +441,8 @@ mod tests {
             })
             .collect();
         for h in handles {
-            h.join().unwrap();
+            h.join()
+                .unwrap();
         }
     }
 }

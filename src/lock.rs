@@ -29,8 +29,12 @@ impl DirLock {
     /// holds it.
     pub fn acquire(dir: &Path) -> Result<Self> {
         let path = dir.join(".bitcask.lock");
-        let file = OpenOptions::new().create(true).write(true).open(&path)?;
-        file.try_lock_exclusive().map_err(|_| Error::AlreadyLocked)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&path)?;
+        file.try_lock_exclusive()
+            .map_err(|_| Error::AlreadyLocked)?;
         Ok(Self(file))
     }
 }

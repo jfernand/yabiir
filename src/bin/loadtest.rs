@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use yabiir::{now_unix, Bitcask, Engine, Options};
+use yabiir::{Bitcask, Engine, Options, now_unix};
 
 #[derive(Parser)]
 #[command(
@@ -167,7 +167,9 @@ fn sleep_or_stop(dur: Duration, stop: &AtomicBool) -> bool {
         if stop.load(Ordering::Relaxed) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())));
+        std::thread::sleep(
+            Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
     stop.load(Ordering::Relaxed)
 }
@@ -184,9 +186,16 @@ fn drain_samples(
     all_samples: &mut HashMap<OpKind, Vec<u64>>,
     csv: &mut Option<BufWriter<File>>,
 ) -> Vec<Sample> {
-    let window: Vec<Sample> = std::mem::take(&mut *samples.lock().unwrap());
+    let window: Vec<Sample> = std::mem::take(
+        &mut *samples
+            .lock()
+            .unwrap(),
+    );
     for &(t, kind, ns) in &window {
-        all_samples.entry(kind).or_default().push(ns);
+        all_samples
+            .entry(kind)
+            .or_default()
+            .push(ns);
         if let Some(w) = csv.as_mut() {
             writeln!(w, "{t:.6},{},{ns}", kind.label()).unwrap();
         }
@@ -202,7 +211,10 @@ fn print_window(window: &[Sample], elapsed_secs: f64) {
     }
     let mut by_kind: HashMap<OpKind, Vec<u64>> = HashMap::new();
     for &(_, kind, ns) in window {
-        by_kind.entry(kind).or_default().push(ns);
+        by_kind
+            .entry(kind)
+            .or_default()
+            .push(ns);
     }
     for kind in ALL_KINDS {
         if let Some(v) = by_kind.get_mut(&kind) {
@@ -216,7 +228,10 @@ fn print_window(window: &[Sample], elapsed_secs: f64) {
                 fmt_ns(percentile(v, 0.90)),
                 fmt_ns(percentile(v, 0.99)),
                 fmt_ns(percentile(v, 0.999)),
-                fmt_ns(*v.last().unwrap())
+                fmt_ns(
+                    *v.last()
+                        .unwrap()
+                )
             );
         }
     }
@@ -234,7 +249,7 @@ fn main() {
             &args.dir,
             Options {
                 max_file_size: args.max_file_size,
-                sync_on_put: args.sync_on_put,
+                should_sync_on_put: args.sync_on_put,
                 ..Options::default()
             },
         )
@@ -244,7 +259,8 @@ fn main() {
     eprintln!("pre-populating {} keys...", args.keys);
     let value = vec![0xABu8; args.value_size];
     for k in 0..args.keys {
-        db.put(&key_bytes(k), &value, now_unix()).unwrap();
+        db.put(&key_bytes(k), &value, now_unix())
+            .unwrap();
     }
     eprintln!(
         "done. running {} threads for {}s (+{}s warmup), merge={}",
@@ -271,7 +287,8 @@ fn main() {
         let stop = Arc::clone(&stop);
         let recording = Arc::clone(&recording);
         let value = value.clone();
-        let (keys, read_w, write_w) = (args.keys, args.read_weight as u64, args.write_weight as u64);
+        let (keys, read_w, write_w) =
+            (args.keys, args.read_weight as u64, args.write_weight as u64);
 
         worker_handles.push(std::thread::spawn(move || {
             let mut rng = Rng::new(0x9E3779B97F4A7C15u64.wrapping_add(worker_id as u64 + 1));
@@ -282,59 +299,90 @@ fn main() {
 
                 let start = Instant::now();
                 let kind = if pick < read_w {
-                    db.get(&k).unwrap();
+                    db.get(&k)
+                        .unwrap();
                     OpKind::Get
                 } else if pick < read_w + write_w {
-                    db.put(&k, &value, now_unix()).unwrap();
+                    db.put(&k, &value, now_unix())
+                        .unwrap();
                     OpKind::Put
                 } else {
-                    db.delete(&k, now_unix()).unwrap();
+                    db.delete(&k, now_unix())
+                        .unwrap();
                     OpKind::Delete
                 };
-                let latency_ns = start.elapsed().as_nanos() as u64;
+                let latency_ns = start
+                    .elapsed()
+                    .as_nanos() as u64;
 
                 if recording.load(Ordering::Relaxed) {
-                    local.push((start.duration_since(overall_start).as_secs_f64(), kind, latency_ns));
+                    local.push((
+                        start
+                            .duration_since(overall_start)
+                            .as_secs_f64(),
+                        kind,
+                        latency_ns,
+                    ));
                     if local.len() >= 64 {
-                        samples.lock().unwrap().extend(local.drain(..));
+                        samples
+                            .lock()
+                            .unwrap()
+                            .extend(local.drain(..));
                     }
                 }
             }
             if !local.is_empty() {
-                samples.lock().unwrap().extend(local.drain(..));
+                samples
+                    .lock()
+                    .unwrap()
+                    .extend(local.drain(..));
             }
         }));
     }
 
-    let merge_handle = args.merge_interval_secs.map(|interval_secs| {
-        let db = Arc::clone(&db);
-        let samples = Arc::clone(&samples);
-        let stop = Arc::clone(&stop);
-        let recording = Arc::clone(&recording);
-        std::thread::spawn(move || {
-            let interval = Duration::from_secs(interval_secs);
-            while !sleep_or_stop(interval, &stop) {
-                let start = Instant::now();
-                db.merge().unwrap();
-                let latency_ns = start.elapsed().as_nanos() as u64;
-                eprintln!("[merge] took {}", fmt_ns(latency_ns));
-                if recording.load(Ordering::Relaxed) {
-                    samples
-                        .lock()
-                        .unwrap()
-                        .push((start.duration_since(overall_start).as_secs_f64(), OpKind::Merge, latency_ns));
+    let merge_handle = args
+        .merge_interval_secs
+        .map(|interval_secs| {
+            let db = Arc::clone(&db);
+            let samples = Arc::clone(&samples);
+            let stop = Arc::clone(&stop);
+            let recording = Arc::clone(&recording);
+            std::thread::spawn(move || {
+                let interval = Duration::from_secs(interval_secs);
+                while !sleep_or_stop(interval, &stop) {
+                    let start = Instant::now();
+                    db.merge()
+                        .unwrap();
+                    let latency_ns = start
+                        .elapsed()
+                        .as_nanos() as u64;
+                    eprintln!("[merge] took {}", fmt_ns(latency_ns));
+                    if recording.load(Ordering::Relaxed) {
+                        samples
+                            .lock()
+                            .unwrap()
+                            .push((
+                                start
+                                    .duration_since(overall_start)
+                                    .as_secs_f64(),
+                                OpKind::Merge,
+                                latency_ns,
+                            ));
+                    }
                 }
-            }
-        })
-    });
+            })
+        });
 
     let total_run = Duration::from_secs(args.warmup_secs + args.duration_secs);
     let mut all_samples: HashMap<OpKind, Vec<u64>> = HashMap::new();
-    let mut csv: Option<BufWriter<File>> = args.csv.as_ref().map(|path| {
-        let mut w = BufWriter::new(File::create(path).expect("failed to create --csv file"));
-        writeln!(w, "elapsed_secs,op,latency_ns").unwrap();
-        w
-    });
+    let mut csv: Option<BufWriter<File>> = args
+        .csv
+        .as_ref()
+        .map(|path| {
+            let mut w = BufWriter::new(File::create(path).expect("failed to create --csv file"));
+            writeln!(w, "elapsed_secs,op,latency_ns").unwrap();
+            w
+        });
     let mut warmup_announced = args.warmup_secs == 0;
 
     println!(
@@ -344,7 +392,13 @@ fn main() {
 
     while overall_start.elapsed() < total_run {
         let remaining = total_run.saturating_sub(overall_start.elapsed());
-        std::thread::sleep(Duration::from_secs(args.report_interval_secs.max(1)).min(remaining.max(Duration::from_millis(1))));
+        std::thread::sleep(
+            Duration::from_secs(
+                args.report_interval_secs
+                    .max(1),
+            )
+            .min(remaining.max(Duration::from_millis(1))),
+        );
 
         if !warmup_announced && overall_start.elapsed() >= Duration::from_secs(args.warmup_secs) {
             recording.store(true, Ordering::Relaxed);
@@ -353,15 +407,22 @@ fn main() {
         }
 
         let window = drain_samples(&samples, &mut all_samples, &mut csv);
-        print_window(&window, overall_start.elapsed().as_secs_f64());
+        print_window(
+            &window,
+            overall_start
+                .elapsed()
+                .as_secs_f64(),
+        );
     }
 
     stop.store(true, Ordering::Relaxed);
     for h in worker_handles {
-        h.join().unwrap();
+        h.join()
+            .unwrap();
     }
     if let Some(h) = merge_handle {
-        h.join().unwrap();
+        h.join()
+            .unwrap();
     }
     // One more drain: a worker's or the merge thread's final flush (its
     // trailing local buffer, or a merge call still in flight when the
@@ -370,9 +431,15 @@ fn main() {
     // data (which, for a multi-second merge, can be the whole thing)
     // would silently never make it into the CSV or the final summary.
     let window = drain_samples(&samples, &mut all_samples, &mut csv);
-    print_window(&window, overall_start.elapsed().as_secs_f64());
+    print_window(
+        &window,
+        overall_start
+            .elapsed()
+            .as_secs_f64(),
+    );
     if let Some(w) = csv.as_mut() {
-        w.flush().unwrap();
+        w.flush()
+            .unwrap();
     }
 
     println!("\n=== final summary (recorded, post-warmup samples only) ===");
@@ -387,7 +454,10 @@ fn main() {
                 fmt_ns(percentile(v, 0.90)),
                 fmt_ns(percentile(v, 0.99)),
                 fmt_ns(percentile(v, 0.999)),
-                fmt_ns(*v.last().unwrap())
+                fmt_ns(
+                    *v.last()
+                        .unwrap()
+                )
             );
         }
     }

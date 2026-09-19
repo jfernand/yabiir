@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use yabiir::{now_unix, Bitcask, Engine, Options};
+use yabiir::{Bitcask, Engine, Options, now_unix};
 
 /// Bitcask CLI: point it at a datastore directory and issue one command.
 #[derive(Parser)]

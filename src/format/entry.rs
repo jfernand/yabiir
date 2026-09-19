@@ -118,9 +118,9 @@ pub fn decode_entry_header(buf: &[u8; HEADER_SIZE]) -> (u32, EntryHeader) {
     (
         crc,
         EntryHeader {
-            tstamp,
-            ksz,
-            value_sz,
+            timestamp: tstamp,
+            key_size: ksz,
+            value_size: value_sz,
             tombstone,
         },
     )
@@ -169,7 +169,7 @@ pub fn read_entry<R: Read>(r: &mut R) -> io::Result<Option<EntryRead>> {
         return Ok(Some(EntryRead::Truncated));
     }
     let (crc, header) = decode_entry_header(&header_buf);
-    let body_len = header.ksz as usize + header.value_sz as usize;
+    let body_len = header.key_size as usize + header.value_size as usize;
     let mut body = vec![0u8; body_len];
     let n2 = read_up_to(r, &mut body)?;
     if n2 < body_len {
@@ -184,8 +184,8 @@ pub fn read_entry<R: Read>(r: &mut R) -> io::Result<Option<EntryRead>> {
         return Ok(Some(EntryRead::CrcMismatch { total_len }));
     }
 
-    let key = body[..header.ksz as usize].to_vec();
-    let value = body[header.ksz as usize..].to_vec();
+    let key = body[..header.key_size as usize].to_vec();
+    let value = body[header.key_size as usize..].to_vec();
     Ok(Some(EntryRead::Ok(Entry { header, key, value }, total_len)))
 }
 
@@ -222,7 +222,7 @@ mod tests {
             assert_eq!(
                 entry
                     .header
-                    .tstamp,
+                    .timestamp,
                 1_700_000_000
             );
             assert_eq!(

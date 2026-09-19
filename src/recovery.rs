@@ -27,8 +27,8 @@ use crate::keydir::{Keydir, KeydirEntry};
 /// already found a data file for. That's the "ignore it" plan §6.5 asks
 /// for, with no extra code needed to get it.
 pub fn recover(dir: &Path, file_ids: &[u32], keydir: &mut Keydir) -> io::Result<()> {
-    for (i, &file_id) in file_ids.iter().enumerate() {
-        let is_last = i + 1 == file_ids.len();
+    for (index, &file_id) in file_ids.iter().enumerate() {
+        let is_last = index + 1 == file_ids.len();
         let hint_path = DataFileSet::hint_path(dir, file_id);
         if hint_path.exists() {
             scan_hint_file(&hint_path, file_id, keydir)?;
@@ -41,7 +41,7 @@ pub fn recover(dir: &Path, file_ids: &[u32], keydir: &mut Keydir) -> io::Result<
 }
 
 fn apply_entry(keydir: &mut Keydir, file_id: u32, entry_start_pos: u64, entry: format::Entry) {
-    let value_pos = entry_start_pos + format::HEADER_SIZE as u64 + entry.header.ksz as u64;
+    let value_pos = entry_start_pos + format::HEADER_SIZE as u64 + entry.header.key_size as u64;
     if entry.header.tombstone {
         keydir.remove(&entry.key);
     } else {
@@ -49,9 +49,9 @@ fn apply_entry(keydir: &mut Keydir, file_id: u32, entry_start_pos: u64, entry: f
             &entry.key,
             KeydirEntry {
                 file_id,
-                value_sz: entry.header.value_sz,
+                value_size: entry.header.value_size,
                 value_pos,
-                tstamp: entry.header.tstamp,
+                timestamp: entry.header.timestamp,
             },
         );
     }
@@ -130,9 +130,9 @@ fn scan_hint_file(path: &Path, file_id: u32, keydir: &mut Keydir) -> io::Result<
                         &key,
                         KeydirEntry {
                             file_id,
-                            value_sz: header.value_sz,
+                            value_size: header.value_size,
                             value_pos,
-                            tstamp: header.tstamp,
+                            timestamp: header.timestamp,
                         },
                     );
                 }
@@ -197,9 +197,9 @@ mod tests {
         let _ = dir;
         let encoded = format::encode_entry(key, value, tombstone, tstamp);
         let header = format::EntryHeader {
-            tstamp,
-            ksz: key.len() as u32,
-            value_sz: value.len() as u32,
+            timestamp: tstamp,
+            key_size: key.len() as u32,
+            value_size: value.len() as u32,
             tombstone,
         };
         let (_, value_pos, total_len) = active.append(&encoded).unwrap();
@@ -208,7 +208,7 @@ mod tests {
 
     fn read_value(dir: &Path, entry: KeydirEntry) -> Vec<u8> {
         DataFileSet::new(dir)
-            .read_at(entry.file_id, entry.value_pos, entry.value_sz)
+            .read_at(entry.file_id, entry.value_pos, entry.value_size)
             .unwrap()
     }
 

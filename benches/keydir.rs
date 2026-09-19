@@ -14,9 +14,9 @@ const POPULATION_SIZES: &[usize] = &[100, 1_000, 10_000, 100_000];
 fn entry(n: u32) -> KeydirEntry {
     KeydirEntry {
         file_id: n,
-        value_sz: n,
+        value_size: n,
         value_pos: n as u64,
-        tstamp: n,
+        timestamp: n,
     }
 }
 

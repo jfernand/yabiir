@@ -11,11 +11,11 @@ use ahash::RandomState as AHashState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeydirEntry {
     pub file_id: u32,
-    pub value_sz: u32,
+    pub value_size: u32,
     /// Position of the VALUE bytes (past the entry header), not the entry
     /// header itself — this is exactly what a read seeks/preads from.
     pub value_pos: u64,
-    pub tstamp: u32,
+    pub timestamp: u32,
 }
 
 /// The keydir itself. Not thread-safe on its own — see [`SharedKeydir`] for
@@ -188,9 +188,9 @@ mod tests {
     fn entry(n: u32) -> KeydirEntry {
         KeydirEntry {
             file_id: n,
-            value_sz: n,
+            value_size: n,
             value_pos: n as u64,
-            tstamp: n,
+            timestamp: n,
         }
     }
 

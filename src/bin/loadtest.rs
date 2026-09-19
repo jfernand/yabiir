@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use yabiir::{Bitcask, Engine, Options};
+use yabiir::{now_unix, Bitcask, Engine, Options};
 
 #[derive(Parser)]
 #[command(
@@ -244,7 +244,7 @@ fn main() {
     eprintln!("pre-populating {} keys...", args.keys);
     let value = vec![0xABu8; args.value_size];
     for k in 0..args.keys {
-        db.put(&key_bytes(k), &value).unwrap();
+        db.put(&key_bytes(k), &value, now_unix()).unwrap();
     }
     eprintln!(
         "done. running {} threads for {}s (+{}s warmup), merge={}",
@@ -285,10 +285,10 @@ fn main() {
                     db.get(&k).unwrap();
                     OpKind::Get
                 } else if pick < read_w + write_w {
-                    db.put(&k, &value).unwrap();
+                    db.put(&k, &value, now_unix()).unwrap();
                     OpKind::Put
                 } else {
-                    db.delete(&k).unwrap();
+                    db.delete(&k, now_unix()).unwrap();
                     OpKind::Delete
                 };
                 let latency_ns = start.elapsed().as_nanos() as u64;

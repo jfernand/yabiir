@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use proptest::prelude::*;
-use yabiir::{Bitcask, Engine, Options};
+use yabiir::{now_unix, Bitcask, Engine, Options};
 
 /// Minimal self-cleaning temp directory — same pattern used throughout this
 /// crate's own tests and benches.
@@ -99,11 +99,11 @@ fn run_model(ops: Vec<Op>) {
     for op in ops {
         match op {
             Op::Put(k, v) => {
-                db.put(&k, &v).unwrap();
+                db.put(&k, &v, now_unix()).unwrap();
                 model.insert(k, v);
             }
             Op::Delete(k) => {
-                db.delete(&k).unwrap();
+                db.delete(&k, now_unix()).unwrap();
                 model.remove(&k);
             }
             Op::Get(k) => {

@@ -20,7 +20,7 @@
 //!
 //! Fixed by having `merge` force the active file to rotate at the end if
 //! its own output ever caught up to or passed it, so the active file is
-//! always the numerically newest thing in the directory again once merge
+//! always the numerically newest thing in the directory again once merge()
 //! returns — the same invariant `open()` establishes fresh every time
 //! (plan §6.4). This fully resolves the sequential case above. It does
 //! **not** fully resolve a key written *truly concurrently* with a merge
@@ -164,7 +164,7 @@ pub(crate) fn merge_with_hook(
             if entry.header.tombstone {
                 continue; // dead by definition — never "live"
             }
-            let entry_value_pos = offset + format::HEADER_SIZE as u64 + entry.header.ksz as u64;
+            let entry_value_pos = offset + format::HEADER_SIZE as u64 + entry.header.key_size as u64;
             let is_live = keydir
                 .get(&entry.key)
                 .is_some_and(|kd| kd.file_id == file_id && kd.value_pos == entry_value_pos);
@@ -183,15 +183,15 @@ pub(crate) fn merge_with_hook(
             //    it is actually flushed, below.
             let old = KeydirEntry {
                 file_id,
-                value_sz: entry.header.value_sz,
+                value_size: entry.header.value_size,
                 value_pos: entry_value_pos,
-                tstamp: entry.header.tstamp,
+                timestamp: entry.header.timestamp,
             };
             let new = KeydirEntry {
                 file_id: new_file_id,
-                value_sz: entry.header.value_sz,
+                value_size: entry.header.value_size,
                 value_pos: new_value_pos,
-                tstamp: entry.header.tstamp,
+                timestamp: entry.header.timestamp,
             };
             pending.push((entry.key, old, new));
 
@@ -340,7 +340,7 @@ impl<'a> MergeOutputWriter<'a> {
     /// — `flushed` tells the caller whether this entry's bytes (and every
     /// other still-pending entry's) are now safe to repoint in the keydir.
     fn write_live_entry(&mut self, entry: &Entry) -> io::Result<(u32, u64, bool)> {
-        let encoded = format::encode_entry(&entry.key, &entry.value, false, entry.header.tstamp);
+        let encoded = format::encode_entry(&entry.key, &entry.value, false, entry.header.timestamp);
         let (file_id, value_pos, _total_len) = self.current_data.append_buffered(&encoded)?;
         let hint = format::encode_hint(&entry.key, &entry.header, value_pos);
         self.current_hint.write_all(hint.as_bytes())?;
@@ -390,7 +390,7 @@ impl<'a> MergeOutputWriter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Bitcask, Engine, Options};
+    use crate::{now_unix, Bitcask, Engine, Options};
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -458,9 +458,9 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"A", b"v1").unwrap();
-        db.put(b"A", b"v2").unwrap();
-        db.put(b"A", b"v3").unwrap();
+        db.put(b"A", b"v1", now_unix()).unwrap();
+        db.put(b"A", b"v2", now_unix()).unwrap();
+        db.put(b"A", b"v3", now_unix()).unwrap();
 
         let before_ids = DataFileSet::discover(&dir).unwrap();
         assert!(
@@ -513,8 +513,8 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"B", b"v").unwrap();
-        db.delete(b"B").unwrap();
+        db.put(b"B", b"v", now_unix()).unwrap();
+        db.delete(b"B", now_unix()).unwrap();
 
         db.merge().unwrap();
 
@@ -534,7 +534,7 @@ mod tests {
         )
         .unwrap();
         for i in 0..30u32 {
-            db.put(format!("k{i}").as_bytes(), format!("v{i}").as_bytes())
+            db.put(format!("k{i}").as_bytes(), format!("v{i}").as_bytes(), now_unix())
                 .unwrap();
         }
 
@@ -571,11 +571,11 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"a", b"1").unwrap();
-        db.put(b"a", b"2").unwrap();
-        db.put(b"b", b"3").unwrap();
-        db.delete(b"b").unwrap();
-        db.put(b"c", b"4").unwrap();
+        db.put(b"a", b"1", now_unix()).unwrap();
+        db.put(b"a", b"2", now_unix()).unwrap();
+        db.put(b"b", b"3", now_unix()).unwrap();
+        db.delete(b"b", now_unix()).unwrap();
+        db.put(b"c", b"4", now_unix()).unwrap();
         db.merge().unwrap();
         db.sync().unwrap();
 
@@ -614,9 +614,9 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"a", b"1").unwrap();
-        db.put(b"a", b"2").unwrap();
-        db.put(b"b", b"3").unwrap();
+        db.put(b"a", b"1", now_unix()).unwrap();
+        db.put(b"a", b"2", now_unix()).unwrap();
+        db.put(b"b", b"3", now_unix()).unwrap();
 
         db.merge().unwrap();
         assert_eq!(db.get(b"a").unwrap(), Some(b"2".to_vec()));
@@ -678,11 +678,11 @@ mod tests {
                         match op {
                             0 => {
                                 let value = format!("v{state}").into_bytes();
-                                db.put(key, &value).unwrap();
+                                db.put(key, &value, now_unix()).unwrap();
                                 reference.insert(key.clone(), value);
                             }
                             1 => {
-                                db.delete(key).unwrap();
+                                db.delete(key, now_unix()).unwrap();
                                 reference.remove(key.as_slice());
                             }
                             _ => {

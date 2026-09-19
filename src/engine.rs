@@ -1,21 +1,20 @@
 //! The single-writer engine tying [`crate::keydir`] and [`crate::datafile`]
 //! together: `put`/`get`/`delete`, implementing the [`Bitcask`] trait. See
 //! `docs/bitcask-implementation-plan.md` §4. `open` recovers the keydir
-//! from any existing data/hint files via [`crate::recovery`] (plan §6);
-//! [`Engine::merge`] compacts non-active files via [`crate::merge`] (plan
+//! from any existing data/hint files via [`recovery`] (plan §6);
+//! [`Engine::merge`] compacts non-active files via [`merge`] (plan
 //! §7); `open` also acquires the process-level single-writer lock via
 //! [`crate::lock`] when `read_write` is set (plan §8.1).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::{Bitcask, Options};
 use crate::commit::GroupCommit;
 use crate::datafile::{ActiveFile, DataFileSet};
 use crate::error::{Error, Result};
-use crate::format;
+use crate::{format};
 use crate::keydir::{Keydir, KeydirEntry, SharedKeydir};
 use crate::lock::DirLock;
 use crate::merge;
@@ -118,7 +117,7 @@ impl Engine {
     fn read_value(&self, entry: KeydirEntry) -> Result<Vec<u8>> {
         Ok(self
             .files
-            .read_at(entry.file_id, entry.value_pos, entry.value_sz)?)
+            .read_at(entry.file_id, entry.value_pos, entry.value_size)?)
     }
 
     /// Test-only entry point into [`merge::merge_with_hook`], exposed here
@@ -207,28 +206,27 @@ impl Bitcask for Engine {
         }
     }
 
-    fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    fn put(&self, key: &[u8], value: &[u8], timestamp: u32) -> Result<()> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
         self.require_write()?;
 
-        let tstamp = now_unix();
-        let encoded = format::encode_entry(key, value, false, tstamp);
+        let encoded = format::encode_entry(key, value, false, timestamp);
         let (file_id, value_pos) = self.append(&encoded)?;
         self.keydir.insert(
             key,
             KeydirEntry {
                 file_id,
-                value_sz: value.len() as u32,
+                value_size: value.len() as u32,
                 value_pos,
-                tstamp,
+                timestamp,
             },
         );
         Ok(())
     }
 
-    fn delete(&self, key: &[u8]) -> Result<()> {
+    fn delete(&self, key: &[u8], timestamp: u32) -> Result<()> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
@@ -237,8 +235,7 @@ impl Bitcask for Engine {
         if self.keydir.get(key).is_none() {
             return Ok(()); // deleting a non-existent key is a no-op
         }
-        let tstamp = now_unix();
-        let encoded = format::encode_entry(key, &[], true, tstamp);
+        let encoded = format::encode_entry(key, &[], true, timestamp);
         self.append(&encoded)?;
         self.keydir.remove(key);
         Ok(())
@@ -291,18 +288,13 @@ impl Bitcask for Engine {
     }
 }
 
-fn now_unix() -> u32 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::now_unix;
 
     /// Minimal self-cleaning temp directory — same pattern as
     /// `src/datafile.rs`'s tests.
@@ -344,7 +336,7 @@ mod tests {
     fn put_then_get_returns_value() {
         let dir = TempDir::new();
         let db = open(&dir);
-        db.put(b"k", b"v").unwrap();
+        db.put(b"k", b"v", now_unix()).unwrap();
         assert_eq!(db.get(b"k").unwrap(), Some(b"v".to_vec()));
     }
 
@@ -352,8 +344,8 @@ mod tests {
     fn put_twice_returns_second_value_only() {
         let dir = TempDir::new();
         let db = open(&dir);
-        db.put(b"k", b"v1").unwrap();
-        db.put(b"k", b"v2").unwrap();
+        db.put(b"k", b"v1", now_unix()).unwrap();
+        db.put(b"k", b"v2", now_unix()).unwrap();
         assert_eq!(db.get(b"k").unwrap(), Some(b"v2".to_vec()));
     }
 
@@ -361,8 +353,8 @@ mod tests {
     fn delete_then_get_returns_none() {
         let dir = TempDir::new();
         let db = open(&dir);
-        db.put(b"k", b"v").unwrap();
-        db.delete(b"k").unwrap();
+        db.put(b"k", b"v", now_unix()).unwrap();
+        db.delete(b"k", now_unix()).unwrap();
         assert_eq!(db.get(b"k").unwrap(), None);
     }
 
@@ -370,7 +362,7 @@ mod tests {
     fn delete_missing_key_is_a_silent_no_op() {
         let dir = TempDir::new();
         let db = open(&dir);
-        db.delete(b"missing").unwrap(); // must not error
+        db.delete(b"missing", now_unix()).unwrap(); // must not error
         assert_eq!(db.get(b"missing").unwrap(), None);
     }
 
@@ -387,7 +379,7 @@ mod tests {
         let db = open(&dir);
         for (key, len) in [(b"empty".as_slice(), 0), (b"one", 1), (b"big", 3 * 1024 * 1024)] {
             let value = vec![0x5Au8; len];
-            db.put(key, &value).unwrap();
+            db.put(key, &value, now_unix()).unwrap();
             assert_eq!(db.get(key).unwrap(), Some(value));
         }
     }
@@ -397,7 +389,7 @@ mod tests {
         let dir = TempDir::new();
         let db = open(&dir);
         for i in 0..10_000u32 {
-            db.put(format!("key-{i}").as_bytes(), format!("value-{i}").as_bytes())
+            db.put(format!("key-{i}").as_bytes(), format!("value-{i}").as_bytes(), now_unix())
                 .unwrap();
         }
         for i in 0..10_000u32 {
@@ -412,14 +404,14 @@ mod tests {
     fn put_rejects_empty_key() {
         let dir = TempDir::new();
         let db = open(&dir);
-        assert!(matches!(db.put(b"", b"v"), Err(Error::EmptyKey)));
+        assert!(matches!(db.put(b"", b"v", now_unix()), Err(Error::EmptyKey)));
     }
 
     #[test]
     fn delete_rejects_empty_key() {
         let dir = TempDir::new();
         let db = open(&dir);
-        assert!(matches!(db.delete(b""), Err(Error::EmptyKey)));
+        assert!(matches!(db.delete(b"", now_unix()), Err(Error::EmptyKey)));
     }
 
     #[test]
@@ -427,7 +419,7 @@ mod tests {
         let dir = TempDir::new();
         {
             let db = open(&dir); // create the directory as a writer first
-            db.put(b"k", b"v").unwrap();
+            db.put(b"k", b"v", now_unix()).unwrap();
         }
         let ro = Engine::open(
             &*dir,
@@ -437,18 +429,18 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(matches!(ro.put(b"k2", b"v2"), Err(Error::ReadOnly)));
-        assert!(matches!(ro.delete(b"k"), Err(Error::ReadOnly)));
+        assert!(matches!(ro.put(b"k2", b"v2", now_unix()), Err(Error::ReadOnly)));
+        assert!(matches!(ro.delete(b"k", now_unix()), Err(Error::ReadOnly)));
     }
 
     #[test]
     fn list_keys_and_fold_reflect_live_keys_only() {
         let dir = TempDir::new();
         let db = open(&dir);
-        db.put(b"a", b"1").unwrap();
-        db.put(b"b", b"2").unwrap();
-        db.put(b"c", b"3").unwrap();
-        db.delete(b"b").unwrap();
+        db.put(b"a", b"1", now_unix()).unwrap();
+        db.put(b"b", b"2", now_unix()).unwrap();
+        db.put(b"c", b"3", now_unix()).unwrap();
+        db.delete(b"b", now_unix()).unwrap();
 
         let mut keys = db.list_keys().unwrap();
         keys.sort();
@@ -473,7 +465,7 @@ mod tests {
         .unwrap();
 
         for i in 0..200u32 {
-            db.put(format!("k{i}").as_bytes(), format!("value-{i}").as_bytes())
+            db.put(format!("k{i}").as_bytes(), format!("value-{i}").as_bytes(), now_unix())
                 .unwrap();
         }
 
@@ -495,10 +487,10 @@ mod tests {
         let dir = TempDir::new();
         {
             let db = open(&dir);
-            db.put(b"k1", b"v1").unwrap();
-            db.put(b"k2", b"v2").unwrap();
-            db.delete(b"k1").unwrap();
-            db.put(b"k3", b"v3").unwrap();
+            db.put(b"k1", b"v1", now_unix()).unwrap();
+            db.put(b"k2", b"v2", now_unix()).unwrap();
+            db.delete(b"k1", now_unix()).unwrap();
+            db.put(b"k3", b"v3", now_unix()).unwrap();
             db.sync().unwrap();
         }
         let reopened = open(&dir);
@@ -517,7 +509,7 @@ mod tests {
         {
             let db = open(&dir);
             for i in 0..500u32 {
-                db.put(format!("k{i}").as_bytes(), format!("v{i}").as_bytes())
+                db.put(format!("k{i}").as_bytes(), format!("v{i}").as_bytes(), now_unix())
                     .unwrap();
             }
             // dropped here without close() — simulates an unclean shutdown
@@ -551,7 +543,7 @@ mod tests {
             )
             .unwrap(),
         );
-        db.put(b"K", b"old").unwrap(); // lands in its own already-rotated-out file
+        db.put(b"K", b"old", now_unix()).unwrap(); // lands in its own already-rotated-out file
 
         let (paused_tx, paused_rx) = std::sync::mpsc::channel::<()>();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
@@ -569,7 +561,7 @@ mod tests {
         });
 
         paused_rx.recv().unwrap(); // merge has copied K forward, about to repoint
-        db.put(b"K", b"new").unwrap(); // race: overwrite K while merge is paused
+        db.put(b"K", b"new", now_unix()).unwrap(); // race: overwrite K while merge is paused
         resume_tx.send(()).unwrap(); // let merge's (now-stale) CAS attempt run
 
         merger.join().unwrap();
@@ -588,10 +580,10 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"k", b"v1").unwrap();
-        db.put(b"k", b"v2").unwrap();
-        db.delete(b"k").unwrap();
-        db.put(b"k2", b"v").unwrap();
+        db.put(b"k", b"v1", now_unix()).unwrap();
+        db.put(b"k", b"v2", now_unix()).unwrap();
+        db.delete(b"k", now_unix()).unwrap();
+        db.put(b"k2", b"v", now_unix()).unwrap();
         assert_eq!(db.get(b"k").unwrap(), None);
         assert_eq!(db.get(b"k2").unwrap(), Some(b"v".to_vec()));
     }
@@ -615,7 +607,7 @@ mod tests {
             )
             .unwrap(),
         );
-        db.put(b"warmup", b"v").unwrap();
+        db.put(b"warmup", b"v", now_unix()).unwrap();
         let before = db.group_commit_fsync_calls();
 
         let n = 32usize;
@@ -623,7 +615,7 @@ mod tests {
             .map(|i| {
                 let db = std::sync::Arc::clone(&db);
                 std::thread::spawn(move || {
-                    db.put(format!("k{i}").as_bytes(), b"v").unwrap();
+                    db.put(format!("k{i}").as_bytes(), b"v", now_unix()).unwrap();
                 })
             })
             .collect();
@@ -659,7 +651,7 @@ mod tests {
     fn read_only_open_succeeds_concurrently_with_a_read_write_open() {
         let dir = TempDir::new();
         let writer = open(&dir);
-        writer.put(b"k", b"v").unwrap();
+        writer.put(b"k", b"v", now_unix()).unwrap();
 
         let reader = Engine::open(
             &*dir,
@@ -673,7 +665,7 @@ mod tests {
 
         // the writer is still usable too — the read-only open didn't
         // disturb it.
-        writer.put(b"k2", b"v2").unwrap();
+        writer.put(b"k2", b"v2", now_unix()).unwrap();
         assert_eq!(writer.get(b"k2").unwrap(), Some(b"v2".to_vec()));
     }
 
@@ -684,7 +676,7 @@ mod tests {
         let dir = TempDir::new();
         {
             let db = open(&dir);
-            db.put(b"k", b"v").unwrap();
+            db.put(b"k", b"v", now_unix()).unwrap();
             // dropped at end of this block
         }
         let db = open(&dir); // must not fail with AlreadyLocked
@@ -697,7 +689,7 @@ mod tests {
     fn close_releases_the_lock_for_the_next_open() {
         let dir = TempDir::new();
         let db = open(&dir);
-        db.put(b"k", b"v").unwrap();
+        db.put(b"k", b"v", now_unix()).unwrap();
         db.close().unwrap();
 
         let db = open(&dir); // must not fail with AlreadyLocked
@@ -711,7 +703,7 @@ mod tests {
         let dir = TempDir::new();
         {
             let db = open(&dir);
-            db.put(b"k", b"v").unwrap();
+            db.put(b"k", b"v", now_unix()).unwrap();
         }
         let read_only_opts = || Options {
             read_write: false,
@@ -732,7 +724,7 @@ mod tests {
         let dir = TempDir::new();
         {
             let db = open(&dir);
-            db.put(b"k", b"v").unwrap();
+            db.put(b"k", b"v", now_unix()).unwrap();
         }
         let ro = Engine::open(
             &*dir,

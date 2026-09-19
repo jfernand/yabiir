@@ -49,20 +49,20 @@ pub use hint::{
 use std::io::{self, Read};
 
 const TOMBSTONE_BIT: u32 = 1 << 31;
-const KSZ_MASK: u32 = !TOMBSTONE_BIT;
+const KEYSIZE_MASK: u32 = !TOMBSTONE_BIT;
 
 /// Largest key length representable in the 31 bits left over after stealing
 /// the top bit of `ksz` for the tombstone flag.
-pub const MAX_KEY_LEN: u32 = KSZ_MASK;
+pub const MAX_KEY_LEN: u32 = KEYSIZE_MASK;
 
 /// Header fields shared by both the data-file entry format and the
 /// hint-file record format (everything except the CRC and, for hints, the
 /// `value_pos` that only a hint record carries).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EntryHeader {
-    pub tstamp: u32,
-    pub ksz: u32,
-    pub value_sz: u32,
+    pub timestamp: u32,
+    pub key_size: u32,
+    pub value_size: u32,
     pub tombstone: bool,
 }
 
@@ -72,15 +72,15 @@ pub struct EntryHeader {
 /// `ksz` the same way.
 fn encode_ksz(key_len: u32, tombstone: bool) -> u32 {
     debug_assert!(
-        key_len <= KSZ_MASK,
-        "key too large ({key_len} bytes, max {KSZ_MASK})"
+        key_len <= MAX_KEY_LEN,
+        "key too large ({key_len} bytes, max {MAX_KEY_LEN})"
     );
     key_len | if tombstone { TOMBSTONE_BIT } else { 0 }
 }
 
 /// Inverse of [`encode_ksz`].
 fn decode_ksz(raw: u32) -> (u32, bool) {
-    (raw & KSZ_MASK, raw & TOMBSTONE_BIT != 0)
+    (raw & KEYSIZE_MASK, raw & TOMBSTONE_BIT != 0)
 }
 
 /// Read up to `buf.len()` bytes, stopping early only at EOF. Returns the

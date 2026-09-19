@@ -65,13 +65,13 @@ pub trait Bitcask: Sized {
     /// Returns [`crate::error::Error::EmptyKey`] if `key` is empty, and
     /// [`crate::error::Error::ReadOnly`] if this handle was opened with
     /// `read_write: false`.
-    fn put(&self, key: &[u8], value: &[u8]) -> Result<()>;
+    fn put(&self, key: &[u8], value: &[u8], timestamp: u32) -> Result<()>;
 
     /// Remove `key`, appending a tombstone entry and evicting `key` from the
     /// keydir. A no-op (not an error) if `key` does not currently exist.
     /// Space used by the deleted value and its tombstone is reclaimed by a
     /// subsequent [`Bitcask::merge`].
-    fn delete(&self, key: &[u8]) -> Result<()>;
+    fn delete(&self, key: &[u8], timestamp: u32) -> Result<()>;
 
     /// Return a snapshot of every currently-live key.
     fn list_keys(&self) -> Result<Vec<Vec<u8>>>;

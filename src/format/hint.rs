@@ -46,17 +46,17 @@ impl AsRef<[u8]> for EncodedHint {
 /// Encode one hint-file record for `key`, whose data-file entry has the
 /// given header and whose value starts at `value_pos` in the data file.
 pub fn encode_hint(key: &[u8], header: &EntryHeader, value_pos: u64) -> EncodedHint {
-    let ksz_and_flags = encode_ksz(header.ksz, header.tombstone);
+    let ksz_and_flags = encode_ksz(header.key_size, header.tombstone);
     let mut buf = Vec::with_capacity(HINT_HEADER_SIZE + key.len());
     buf.extend_from_slice(
         &header
-            .tstamp
+            .timestamp
             .to_le_bytes(),
     );
     buf.extend_from_slice(&ksz_and_flags.to_le_bytes());
     buf.extend_from_slice(
         &header
-            .value_sz
+            .value_size
             .to_le_bytes(),
     );
     buf.extend_from_slice(&value_pos.to_le_bytes());
@@ -89,9 +89,9 @@ pub fn decode_hint_header(buf: &[u8; HINT_HEADER_SIZE]) -> (EntryHeader, u64) {
     let (ksz, tombstone) = decode_ksz(ksz_and_flags);
     (
         EntryHeader {
-            tstamp,
-            ksz,
-            value_sz,
+            timestamp: tstamp,
+            key_size: ksz,
+            value_size: value_sz,
             tombstone,
         },
         value_pos,
@@ -122,7 +122,7 @@ pub fn read_hint<R: Read>(r: &mut R) -> io::Result<Option<HintRead>> {
         return Ok(Some(HintRead::Truncated));
     }
     let (header, value_pos) = decode_hint_header(&header_buf);
-    let mut key = vec![0u8; header.ksz as usize];
+    let mut key = vec![0u8; header.key_size as usize];
     let n2 = read_up_to(r, &mut key)?;
     if n2 < key.len() {
         return Ok(Some(HintRead::Truncated));
@@ -142,9 +142,9 @@ mod tests {
     #[test]
     fn hint_round_trip() {
         let header = EntryHeader {
-            tstamp: 42,
-            ksz: 3,
-            value_sz: 10,
+            timestamp: 42,
+            key_size: 3,
+            value_size: 10,
             tombstone: false,
         };
         let encoded = encode_hint(b"key", &header, 12345);

@@ -78,9 +78,9 @@ fn bench_read_entry(c: &mut Criterion) {
 
 fn bench_encode_hint(c: &mut Criterion) {
     let header = EntryHeader {
-        tstamp: 1_700_000_000,
-        ksz: KEY.len() as u32,
-        value_sz: 1024,
+        timestamp: 1_700_000_000,
+        key_size: KEY.len() as u32,
+        value_size: 1024,
         tombstone: false,
     };
     c.bench_function("encode_hint", |b| {
@@ -96,9 +96,9 @@ fn bench_encode_hint(c: &mut Criterion) {
 
 fn bench_decode_hint_header(c: &mut Criterion) {
     let header = EntryHeader {
-        tstamp: 1_700_000_000,
-        ksz: KEY.len() as u32,
-        value_sz: 1024,
+        timestamp: 1_700_000_000,
+        key_size: KEY.len() as u32,
+        value_size: 1024,
         tombstone: false,
     };
     let encoded = encode_hint(KEY, &header, 4096).into_bytes();
@@ -113,9 +113,9 @@ fn bench_decode_hint_header(c: &mut Criterion) {
 
 fn bench_read_hint(c: &mut Criterion) {
     let header = EntryHeader {
-        tstamp: 1_700_000_000,
-        ksz: KEY.len() as u32,
-        value_sz: 1024,
+        timestamp: 1_700_000_000,
+        key_size: KEY.len() as u32,
+        value_size: 1024,
         tombstone: false,
     };
     let encoded = encode_hint(KEY, &header, 4096).into_bytes();

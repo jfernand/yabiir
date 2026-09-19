@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use yabiir::{Bitcask, Engine, Options};
+use yabiir::{now_unix, Bitcask, Engine, Options};
 
 /// Bitcask CLI: point it at a datastore directory and issue one command.
 #[derive(Parser)]
@@ -48,7 +48,7 @@ fn run(args: Args) -> yabiir::Result<ExitCode> {
 
     let code = match args.command {
         Command::Add { key, value } => {
-            db.put(key.as_bytes(), value.as_bytes())?;
+            db.put(key.as_bytes(), value.as_bytes(), now_unix())?;
             ExitCode::SUCCESS
         }
         Command::Get { key } => match db.get(key.as_bytes())? {
@@ -62,7 +62,7 @@ fn run(args: Args) -> yabiir::Result<ExitCode> {
             }
         },
         Command::Rm { key } => {
-            db.delete(key.as_bytes())?;
+            db.delete(key.as_bytes(), now_unix())?;
             ExitCode::SUCCESS
         }
         Command::List => {

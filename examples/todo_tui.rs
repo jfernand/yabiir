@@ -114,7 +114,7 @@ impl App {
     fn toggle_selected(&mut self) -> yabiir::Result<()> {
         if let Some(todo) = self.todos.get_mut(self.selected) {
             todo.done = !todo.done;
-            self.db.put(&todo_key(todo.id), &encode_todo(todo))?;
+            self.db.put(&todo_key(todo.id), &encode_todo(todo), now_unix())?;
         }
         Ok(())
     }
@@ -122,7 +122,7 @@ impl App {
     fn delete_selected(&mut self) -> yabiir::Result<()> {
         if self.selected < self.todos.len() {
             let todo = self.todos.remove(self.selected);
-            self.db.delete(&todo_key(todo.id))?;
+            self.db.delete(&todo_key(todo.id), now_unix())?;
             if self.selected >= self.todos.len() && self.selected > 0 {
                 self.selected -= 1;
             }
@@ -140,7 +140,7 @@ impl App {
             done: false,
             created_at: now_unix(),
         };
-        self.db.put(&todo_key(todo.id), &encode_todo(&todo))?;
+        self.db.put(&todo_key(todo.id), &encode_todo(&todo), now_unix())?;
         self.next_id += 1;
         self.todos.push(todo);
         self.selected = self.todos.len() - 1;

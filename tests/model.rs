@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use proptest::prelude::*;
-use yabiir::{now_unix, Bitcask, Engine, Options};
+use yabiir::{Bitcask, Engine, Options, now_unix};
 
 /// Minimal self-cleaning temp directory — same pattern used throughout this
 /// crate's own tests and benches.
@@ -30,7 +30,10 @@ impl TempDir {
             "yabiir-model-test-{}-{}-{}",
             std::process::id(),
             n,
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&path).unwrap();
         Self(path)
@@ -99,35 +102,54 @@ fn run_model(ops: Vec<Op>) {
     for op in ops {
         match op {
             Op::Put(k, v) => {
-                db.put(&k, &v, now_unix()).unwrap();
+                db.put(&k, &v, now_unix())
+                    .unwrap();
                 model.insert(k, v);
             }
             Op::Delete(k) => {
-                db.delete(&k, now_unix()).unwrap();
+                db.delete(&k, now_unix())
+                    .unwrap();
                 model.remove(&k);
             }
             Op::Get(k) => {
-                assert_eq!(db.get(&k).unwrap(), model.get(&k).cloned());
+                assert_eq!(
+                    db.get(&k)
+                        .unwrap(),
+                    model
+                        .get(&k)
+                        .cloned()
+                );
             }
             Op::Reopen => {
                 drop(db);
                 db = Engine::open(&*dir, small_file_options()).unwrap();
             }
             Op::Merge => {
-                db.merge().unwrap();
+                db.merge()
+                    .unwrap();
             }
         }
     }
 
     // Final full comparison, not just the interleaved Get checks above —
     // catches anything a Get happened not to probe during the sequence.
-    let mut keys: Vec<_> = db.list_keys().unwrap();
+    let mut keys: Vec<_> = db
+        .list_keys()
+        .unwrap();
     keys.sort();
-    let mut model_keys: Vec<_> = model.keys().cloned().collect();
+    let mut model_keys: Vec<_> = model
+        .keys()
+        .cloned()
+        .collect();
     model_keys.sort();
     assert_eq!(keys, model_keys);
     for k in &keys {
-        assert_eq!(db.get(k).unwrap().as_ref(), model.get(k));
+        assert_eq!(
+            db.get(k)
+                .unwrap()
+                .as_ref(),
+            model.get(k)
+        );
     }
 }
 

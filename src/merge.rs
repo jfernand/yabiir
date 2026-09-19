@@ -136,7 +136,10 @@ pub(crate) fn merge_with_hook(
     //    *during* the merge (concurrent puts are still allowed) are simply
     //    not included in this pass — they'll be picked up by the next
     //    merge. Safe and simple (plan §7.2 step 1).
-    let active_id_at_start = active.lock().unwrap().file_id();
+    let active_id_at_start = active
+        .lock()
+        .unwrap()
+        .file_id();
     let input_ids: Vec<u32> = DataFileSet::discover(dir)?
         .into_iter()
         .filter(|&id| id < active_id_at_start)
@@ -161,10 +164,17 @@ pub(crate) fn merge_with_hook(
     for &file_id in &input_ids {
         let data_path = DataFileSet::data_path(dir, file_id);
         for (offset, entry) in read_all_entries(&data_path)? {
-            if entry.header.tombstone {
+            if entry
+                .header
+                .tombstone
+            {
                 continue; // dead by definition — never "live"
             }
-            let entry_value_pos = offset + format::HEADER_SIZE as u64 + entry.header.key_size as u64;
+            let entry_value_pos = offset
+                + format::HEADER_SIZE as u64
+                + entry
+                    .header
+                    .key_size as u64;
             let is_live = keydir
                 .get(&entry.key)
                 .is_some_and(|kd| kd.file_id == file_id && kd.value_pos == entry_value_pos);
@@ -183,15 +193,23 @@ pub(crate) fn merge_with_hook(
             //    it is actually flushed, below.
             let old = KeydirEntry {
                 file_id,
-                value_size: entry.header.value_size,
+                value_size: entry
+                    .header
+                    .value_size,
                 value_pos: entry_value_pos,
-                timestamp: entry.header.timestamp,
+                timestamp: entry
+                    .header
+                    .timestamp,
             };
             let new = KeydirEntry {
                 file_id: new_file_id,
-                value_size: entry.header.value_size,
+                value_size: entry
+                    .header
+                    .value_size,
                 value_pos: new_value_pos,
-                timestamp: entry.header.timestamp,
+                timestamp: entry
+                    .header
+                    .timestamp,
             };
             pending.push((entry.key, old, new));
 
@@ -220,7 +238,9 @@ pub(crate) fn merge_with_hook(
     //    no-op in the common case where the active file already rotated
     //    past highest_output_id on its own (e.g. from puts during merge).
     {
-        let mut active_guard = active.lock().unwrap();
+        let mut active_guard = active
+            .lock()
+            .unwrap();
         if active_guard.file_id() <= highest_output_id {
             active_guard.sync()?;
             group_commit.mark_all_durable();
@@ -321,7 +341,10 @@ impl<'a> MergeOutputWriter<'a> {
         })
     }
 
-    fn open_output(dir: &Path, next_file_id: &AtomicU32) -> io::Result<(ActiveFile, BufWriter<File>)> {
+    fn open_output(
+        dir: &Path,
+        next_file_id: &AtomicU32,
+    ) -> io::Result<(ActiveFile, BufWriter<File>)> {
         // Claims an id from the *same* counter the engine's write path uses
         // for active-file rotation, so merge-output ids never collide with
         // a concurrently-rotated active file.
@@ -332,7 +355,8 @@ impl<'a> MergeOutputWriter<'a> {
     }
 
     fn current_file_id(&self) -> u32 {
-        self.current_data.file_id()
+        self.current_data
+            .file_id()
     }
 
     /// Writes one live entry (unflushed) plus its hint record, and rotates
@@ -340,13 +364,27 @@ impl<'a> MergeOutputWriter<'a> {
     /// — `flushed` tells the caller whether this entry's bytes (and every
     /// other still-pending entry's) are now safe to repoint in the keydir.
     fn write_live_entry(&mut self, entry: &Entry) -> io::Result<(u32, u64, bool)> {
-        let encoded = format::encode_entry(&entry.key, &entry.value, false, entry.header.timestamp);
-        let (file_id, value_pos, _total_len) = self.current_data.append_buffered(&encoded)?;
+        let encoded = format::encode_entry(
+            &entry.key,
+            &entry.value,
+            false,
+            entry
+                .header
+                .timestamp,
+        );
+        let (file_id, value_pos, _total_len) = self
+            .current_data
+            .append_buffered(&encoded)?;
         let hint = format::encode_hint(&entry.key, &entry.header, value_pos);
-        self.current_hint.write_all(hint.as_bytes())?;
+        self.current_hint
+            .write_all(hint.as_bytes())?;
         self.pending_since_flush += 1;
 
-        let flushed = if self.current_data.len() >= self.max_file_size {
+        let flushed = if self
+            .current_data
+            .len()
+            >= self.max_file_size
+        {
             self.rotate()?; // fsyncs — a strictly stronger guarantee than a flush
             true
         } else if self.pending_since_flush >= MERGE_FLUSH_BATCH_SIZE {
@@ -365,14 +403,17 @@ impl<'a> MergeOutputWriter<'a> {
     /// more than the rest of this design already promises without
     /// `sync_on_put`.
     fn flush_batch(&mut self) -> io::Result<()> {
-        self.current_data.flush_only()?;
+        self.current_data
+            .flush_only()?;
         self.pending_since_flush = 0;
         Ok(())
     }
 
     fn rotate(&mut self) -> io::Result<()> {
-        self.current_data.sync()?;
-        self.current_hint.flush()?;
+        self.current_data
+            .sync()?;
+        self.current_hint
+            .flush()?;
         let (data, hint) = Self::open_output(self.dir, self.next_file_id)?;
         self.current_data = data;
         self.current_hint = hint;
@@ -381,8 +422,10 @@ impl<'a> MergeOutputWriter<'a> {
     }
 
     fn finish(mut self) -> io::Result<()> {
-        self.current_data.sync()?;
-        self.current_hint.flush()?;
+        self.current_data
+            .sync()?;
+        self.current_hint
+            .flush()?;
         Ok(())
     }
 }
@@ -390,7 +433,7 @@ impl<'a> MergeOutputWriter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{now_unix, Bitcask, Engine, Options};
+    use crate::{Bitcask, Engine, Options, now_unix};
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -410,7 +453,10 @@ mod tests {
                 "yabiir-merge-test-{}-{}-{}",
                 std::process::id(),
                 n,
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
             ));
             fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -458,9 +504,12 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"A", b"v1", now_unix()).unwrap();
-        db.put(b"A", b"v2", now_unix()).unwrap();
-        db.put(b"A", b"v3", now_unix()).unwrap();
+        db.put(b"A", b"v1", now_unix())
+            .unwrap();
+        db.put(b"A", b"v2", now_unix())
+            .unwrap();
+        db.put(b"A", b"v3", now_unix())
+            .unwrap();
 
         let before_ids = DataFileSet::discover(&dir).unwrap();
         assert!(
@@ -468,14 +517,22 @@ mod tests {
             "expected 3 rotated files + 1 active, got {before_ids:?}"
         );
 
-        db.merge().unwrap();
+        db.merge()
+            .unwrap();
 
-        assert_eq!(db.get(b"A").unwrap(), Some(b"v3".to_vec()));
+        assert_eq!(
+            db.get(b"A")
+                .unwrap(),
+            Some(b"v3".to_vec())
+        );
         assert_eq!(count_entries_for_key(&dir, b"A"), 1); // only the latest version survives anywhere on disk
 
         let after_ids = DataFileSet::discover(&dir).unwrap();
         for &id in &before_ids[..before_ids.len() - 1] {
-            assert!(!after_ids.contains(&id), "old file {id} should have been removed");
+            assert!(
+                !after_ids.contains(&id),
+                "old file {id} should have been removed"
+            );
         }
         // The highest id after merge is always the (possibly freshly
         // forced-rotated, per merge.rs's file-ordering correctness note)
@@ -488,7 +545,10 @@ mod tests {
             .filter(|id| !before_ids.contains(id))
             .collect();
         new_ids.sort_unstable();
-        assert!(!new_ids.is_empty(), "expected at least one new merge-output file");
+        assert!(
+            !new_ids.is_empty(),
+            "expected at least one new merge-output file"
+        );
         let merge_output_ids = &new_ids[..new_ids.len() - 1];
         assert!(
             !merge_output_ids.is_empty(),
@@ -513,12 +573,19 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"B", b"v", now_unix()).unwrap();
-        db.delete(b"B", now_unix()).unwrap();
+        db.put(b"B", b"v", now_unix())
+            .unwrap();
+        db.delete(b"B", now_unix())
+            .unwrap();
 
-        db.merge().unwrap();
+        db.merge()
+            .unwrap();
 
-        assert_eq!(db.get(b"B").unwrap(), None);
+        assert_eq!(
+            db.get(b"B")
+                .unwrap(),
+            None
+        );
         assert_eq!(count_entries_for_key(&dir, b"B"), 0); // no trace, live or tombstone
     }
 
@@ -534,8 +601,12 @@ mod tests {
         )
         .unwrap();
         for i in 0..30u32 {
-            db.put(format!("k{i}").as_bytes(), format!("v{i}").as_bytes(), now_unix())
-                .unwrap();
+            db.put(
+                format!("k{i}").as_bytes(),
+                format!("v{i}").as_bytes(),
+                now_unix(),
+            )
+            .unwrap();
         }
 
         let before_ids = DataFileSet::discover(&dir).unwrap();
@@ -543,18 +614,28 @@ mod tests {
             before_ids.len() > 2,
             "test needs multiple rotated files, got {before_ids:?}"
         );
-        let active_id = *before_ids.last().unwrap();
+        let active_id = *before_ids
+            .last()
+            .unwrap();
         let an_old_id = before_ids[0];
 
-        db.merge().unwrap();
+        db.merge()
+            .unwrap();
 
         let after_ids = DataFileSet::discover(&dir).unwrap();
-        assert!(after_ids.contains(&active_id), "active file must survive merge untouched");
-        assert!(!after_ids.contains(&an_old_id), "an old rotated file should have been merged away");
+        assert!(
+            after_ids.contains(&active_id),
+            "active file must survive merge untouched"
+        );
+        assert!(
+            !after_ids.contains(&an_old_id),
+            "an old rotated file should have been merged away"
+        );
 
         for i in 0..30u32 {
             assert_eq!(
-                db.get(format!("k{i}").as_bytes()).unwrap(),
+                db.get(format!("k{i}").as_bytes())
+                    .unwrap(),
                 Some(format!("v{i}").into_bytes())
             );
         }
@@ -571,15 +652,24 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"a", b"1", now_unix()).unwrap();
-        db.put(b"a", b"2", now_unix()).unwrap();
-        db.put(b"b", b"3", now_unix()).unwrap();
-        db.delete(b"b", now_unix()).unwrap();
-        db.put(b"c", b"4", now_unix()).unwrap();
-        db.merge().unwrap();
-        db.sync().unwrap();
+        db.put(b"a", b"1", now_unix())
+            .unwrap();
+        db.put(b"a", b"2", now_unix())
+            .unwrap();
+        db.put(b"b", b"3", now_unix())
+            .unwrap();
+        db.delete(b"b", now_unix())
+            .unwrap();
+        db.put(b"c", b"4", now_unix())
+            .unwrap();
+        db.merge()
+            .unwrap();
+        db.sync()
+            .unwrap();
 
-        let mut expected_keys = db.list_keys().unwrap();
+        let mut expected_keys = db
+            .list_keys()
+            .unwrap();
         expected_keys.sort();
 
         // A fresh, independent, *read-only* open (a second read_write
@@ -595,11 +685,19 @@ mod tests {
             },
         )
         .unwrap();
-        let mut got_keys = reopened.list_keys().unwrap();
+        let mut got_keys = reopened
+            .list_keys()
+            .unwrap();
         got_keys.sort();
         assert_eq!(got_keys, expected_keys);
         for key in &got_keys {
-            assert_eq!(reopened.get(key).unwrap(), db.get(key).unwrap());
+            assert_eq!(
+                reopened
+                    .get(key)
+                    .unwrap(),
+                db.get(key)
+                    .unwrap()
+            );
         }
     }
 
@@ -614,17 +712,38 @@ mod tests {
             },
         )
         .unwrap();
-        db.put(b"a", b"1", now_unix()).unwrap();
-        db.put(b"a", b"2", now_unix()).unwrap();
-        db.put(b"b", b"3", now_unix()).unwrap();
+        db.put(b"a", b"1", now_unix())
+            .unwrap();
+        db.put(b"a", b"2", now_unix())
+            .unwrap();
+        db.put(b"b", b"3", now_unix())
+            .unwrap();
 
-        db.merge().unwrap();
-        assert_eq!(db.get(b"a").unwrap(), Some(b"2".to_vec()));
-        assert_eq!(db.get(b"b").unwrap(), Some(b"3".to_vec()));
+        db.merge()
+            .unwrap();
+        assert_eq!(
+            db.get(b"a")
+                .unwrap(),
+            Some(b"2".to_vec())
+        );
+        assert_eq!(
+            db.get(b"b")
+                .unwrap(),
+            Some(b"3".to_vec())
+        );
 
-        db.merge().unwrap(); // merging an already-merged, unchanged datastore again
-        assert_eq!(db.get(b"a").unwrap(), Some(b"2".to_vec()));
-        assert_eq!(db.get(b"b").unwrap(), Some(b"3".to_vec()));
+        db.merge()
+            .unwrap(); // merging an already-merged, unchanged datastore again
+        assert_eq!(
+            db.get(b"a")
+                .unwrap(),
+            Some(b"2".to_vec())
+        );
+        assert_eq!(
+            db.get(b"b")
+                .unwrap(),
+            Some(b"3".to_vec())
+        );
     }
 
     /// Plan §7.5's stress test: one thread merging in a loop while several
@@ -646,14 +765,17 @@ mod tests {
             .unwrap(),
         );
         let reference = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
-        let keys: Vec<Vec<u8>> = (0..8u32).map(|i| format!("k{i}").into_bytes()).collect();
+        let keys: Vec<Vec<u8>> = (0..8u32)
+            .map(|i| format!("k{i}").into_bytes())
+            .collect();
         let deadline = Instant::now() + Duration::from_millis(500);
 
         let merger = {
             let db = Arc::clone(&db);
             std::thread::spawn(move || {
                 while Instant::now() < deadline {
-                    db.merge().unwrap();
+                    db.merge()
+                        .unwrap();
                 }
             })
         };
@@ -668,25 +790,32 @@ mod tests {
                     // dependency just for test-input shuffling.
                     let mut state = 0x9E3779B97F4A7C15u64.wrapping_add(worker_id);
                     while Instant::now() < deadline {
-                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        state = state
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1);
                         let key = &keys[(state as usize) % keys.len()];
                         let op = (state >> 32) % 3;
                         // Hold the reference lock across both the real
                         // mutation and the model update, so the two never
                         // drift apart and the final comparison is valid.
-                        let mut reference = reference.lock().unwrap();
+                        let mut reference = reference
+                            .lock()
+                            .unwrap();
                         match op {
                             0 => {
                                 let value = format!("v{state}").into_bytes();
-                                db.put(key, &value, now_unix()).unwrap();
+                                db.put(key, &value, now_unix())
+                                    .unwrap();
                                 reference.insert(key.clone(), value);
                             }
                             1 => {
-                                db.delete(key, now_unix()).unwrap();
+                                db.delete(key, now_unix())
+                                    .unwrap();
                                 reference.remove(key.as_slice());
                             }
                             _ => {
-                                db.get(key).unwrap(); // extra concurrent read pressure
+                                db.get(key)
+                                    .unwrap(); // extra concurrent read pressure
                             }
                         }
                     }
@@ -695,19 +824,26 @@ mod tests {
             .collect();
 
         for w in workers {
-            w.join().unwrap();
+            w.join()
+                .unwrap();
         }
-        merger.join().unwrap();
+        merger
+            .join()
+            .unwrap();
 
-        let reference = reference.lock().unwrap();
+        let reference = reference
+            .lock()
+            .unwrap();
         for key in &keys {
             assert_eq!(
-                db.get(key).unwrap(),
-                reference.get(key.as_slice()).cloned(),
+                db.get(key)
+                    .unwrap(),
+                reference
+                    .get(key.as_slice())
+                    .cloned(),
                 "mismatch for {:?}",
                 String::from_utf8_lossy(key)
             );
         }
     }
 }
-

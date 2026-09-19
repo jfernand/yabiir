@@ -4,10 +4,11 @@
 //!
 //! Run with: `cargo run --example basic_usage`
 
-use yabiir::{now_unix, Bitcask, Engine, Options};
+use yabiir::{Bitcask, Engine, Options, now_unix};
 
 fn main() -> yabiir::Result<()> {
-    let dir = std::env::temp_dir().join(format!("yabiir-basic-usage-example-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("yabiir-basic-usage-example-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir); // start from a clean slate each run
 
     println!("opening datastore at {}", dir.display());
@@ -30,7 +31,10 @@ fn main() -> yabiir::Result<()> {
 
     let mut keys = db.list_keys()?;
     keys.sort();
-    let readable_keys: Vec<_> = keys.iter().map(|k| String::from_utf8_lossy(k)).collect();
+    let readable_keys: Vec<_> = keys
+        .iter()
+        .map(|k| String::from_utf8_lossy(k))
+        .collect();
     println!("live keys: {readable_keys:?}");
 
     // Sum the byte length of every live value — a stand-in for whatever

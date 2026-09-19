@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use yabiir::{now_unix, Bitcask, Engine, Options};
+use yabiir::{Bitcask, Engine, Options, now_unix};
 
 /// Minimal self-cleaning temp directory — same pattern used throughout this
 /// crate's own tests and other benches.
@@ -72,7 +72,8 @@ fn build_dataset(num_keys: usize, versions_per_key: usize, value_size: usize) ->
     let value = vec![0xABu8; value_size];
     for _ in 0..versions_per_key {
         for k in 0..num_keys {
-            db.put(format!("key-{k:06}").as_bytes(), &value, now_unix()).unwrap();
+            db.put(format!("key-{k:06}").as_bytes(), &value, now_unix())
+                .unwrap();
         }
     }
     (dir, db)
@@ -89,12 +90,16 @@ fn bench_merge_noop(c: &mut Criterion) {
                 let dir = TempDir::new();
                 let db = Engine::open(&*dir, Options::default()).unwrap();
                 for i in 0..50u32 {
-                    db.put(format!("k{i}").as_bytes(), b"v", now_unix()).unwrap();
+                    db.put(format!("k{i}").as_bytes(), b"v", now_unix())
+                        .unwrap();
                 }
                 (dir, db)
             },
             |(dir, db)| {
-                black_box(db.merge().unwrap());
+                black_box(
+                    db.merge()
+                        .unwrap(),
+                );
                 (dir, db) // keep both alive until the batch is torn down
             },
             BatchSize::SmallInput,
@@ -120,7 +125,8 @@ fn bench_merge_by_dead_ratio(c: &mut Criterion) {
                 b.iter_batched(
                     || build_dataset(NUM_KEYS, versions, VALUE_SIZE),
                     |(dir, db)| {
-                        db.merge().unwrap();
+                        db.merge()
+                            .unwrap();
                         (dir, db)
                     },
                     BatchSize::SmallInput,
@@ -148,7 +154,8 @@ fn bench_merge_by_input_file_count(c: &mut Criterion) {
                 b.iter_batched(
                     || build_dataset(num_files, 1, VALUE_SIZE),
                     |(dir, db)| {
-                        db.merge().unwrap();
+                        db.merge()
+                            .unwrap();
                         (dir, db)
                     },
                     BatchSize::SmallInput,

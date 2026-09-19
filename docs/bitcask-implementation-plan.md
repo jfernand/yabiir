@@ -1038,7 +1038,9 @@ impl Default for Options {
     }
 }
 
-pub struct Bitcask { /* as in §4.1 */ }
+pub struct Bitcask {
+    /* as in §4.1 */
+}
 
 impl Bitcask {
     pub fn open(dir: impl AsRef<Path>, opts: Options) -> Result<Self>;
@@ -1128,10 +1130,19 @@ fn run_model(ops: Vec<Op>) {
     let mut db = Bitcask::open(&dir, Options::default()).unwrap();
     for op in ops {
         match op {
-            Op::Put(k, v) => { db.put(&k, &v).unwrap(); model.insert(k, v); }
-            Op::Delete(k) => { db.delete(&k).unwrap(); model.remove(&k); }
+            Op::Put(k, v) => {
+                db.put(&k, &v).unwrap();
+                model.insert(k, v);
+            }
+            Op::Delete(k) => {
+                db.delete(&k).unwrap();
+                model.remove(&k);
+            }
             Op::Get(k) => assert_eq!(db.get(&k).unwrap(), model.get(&k).cloned()),
-            Op::Reopen => { drop(db); db = Bitcask::open(&dir, Options::default()).unwrap(); }
+            Op::Reopen => {
+                drop(db);
+                db = Bitcask::open(&dir, Options::default()).unwrap();
+            }
             Op::Merge => db.merge().unwrap(),
         }
     }

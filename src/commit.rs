@@ -77,7 +77,10 @@ impl GroupCommit {
     /// so the generation numbers handed out reflect real append order.
     /// Returns the generation this write must see covered by `commit`.
     pub(crate) fn record_pending(&self) -> u64 {
-        let mut state = self.state.lock().unwrap(); // TODO
+        let mut state = self
+            .state
+            .lock()
+            .unwrap(); // TODO
         state.pending_writes += 1;
         state.pending_writes
     }
@@ -88,9 +91,13 @@ impl GroupCommit {
     /// same append lock `record_pending` was called under for the writes
     /// it's meant to cover.
     pub(crate) fn mark_all_durable(&self) {
-        let mut state = self.state.lock().unwrap(); // TODO
+        let mut state = self
+            .state
+            .lock()
+            .unwrap(); // TODO
         state.max_durable_generation = state.pending_writes; // pending_writes == last recorded generation
-        self.cond_var.notify_all(); // wakey, wakey, all threads waiting for me
+        self.cond_var
+            .notify_all(); // wakey, wakey, all threads waiting for me
     }
 
     /// Block until `target_gen` is durable. If no fsync is currently in
@@ -102,7 +109,10 @@ impl GroupCommit {
         target_generation: u64,
         do_fsync: impl Fn() -> io::Result<()>,
     ) -> io::Result<()> {
-        let mut state = self.state.lock().unwrap(); // TODO
+        let mut state = self
+            .state
+            .lock()
+            .unwrap(); // TODO
         loop {
             if state.max_durable_generation >= target_generation {
                 return Ok(());
@@ -112,24 +122,35 @@ impl GroupCommit {
                 let covers_up_to = state.pending_writes;
                 drop(state);
                 let result = do_fsync();
-                self.n_fsync_calls.fetch_add(1, Ordering::Relaxed);
-                state = self.state.lock().unwrap();
+                self.n_fsync_calls
+                    .fetch_add(1, Ordering::Relaxed);
+                state = self
+                    .state
+                    .lock()
+                    .unwrap();
                 state.is_syncing = false;
                 if result.is_ok() {
-                    state.max_durable_generation = state.max_durable_generation.max(covers_up_to);
+                    state.max_durable_generation = state
+                        .max_durable_generation
+                        .max(covers_up_to);
                 }
-                self.cond_var.notify_all();
+                self.cond_var
+                    .notify_all();
                 result?;
                 // loop: re-check state.durable >= target_gen above
             } else {
-                state = self.cond_var.wait(state).unwrap();
+                state = self
+                    .cond_var
+                    .wait(state)
+                    .unwrap();
             }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn fsync_call_count(&self) -> usize {
-        self.n_fsync_calls.load(Ordering::Relaxed)
+        self.n_fsync_calls
+            .load(Ordering::Relaxed)
     }
 }
 
@@ -146,7 +167,8 @@ mod tests {
     fn single_writer_commits_and_sees_exactly_one_fsync() {
         let gc = GroupCommit::new();
         let target_gen = gc.record_pending();
-        gc.commit(target_gen, || Ok(())).unwrap();
+        gc.commit(target_gen, || Ok(()))
+            .unwrap();
         assert_eq!(gc.fsync_call_count(), 1);
     }
 
@@ -155,7 +177,8 @@ mod tests {
         let gc = GroupCommit::new();
         let target_gen = gc.record_pending();
         gc.mark_all_durable();
-        gc.commit(target_gen, || panic!("should not fsync: already durable")).unwrap();
+        gc.commit(target_gen, || panic!("should not fsync: already durable"))
+            .unwrap();
         assert_eq!(gc.fsync_call_count(), 0);
     }
 
@@ -169,7 +192,9 @@ mod tests {
     fn concurrent_committers_share_one_fsync() {
         let gc = Arc::new(GroupCommit::new());
         let n = 8u64;
-        let gens: Vec<u64> = (0..n).map(|_| gc.record_pending()).collect();
+        let gens: Vec<u64> = (0..n)
+            .map(|_| gc.record_pending())
+            .collect();
 
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let (leader_entered_tx, leader_entered_rx) = mpsc::channel::<()>();
@@ -180,14 +205,22 @@ mod tests {
         let leader = thread::spawn(move || {
             leader_gc
                 .commit(leader_gen, || {
-                    leader_entered_tx.send(()).unwrap();
-                    release_rx.lock().unwrap().recv().unwrap();
+                    leader_entered_tx
+                        .send(())
+                        .unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv()
+                        .unwrap();
                     Ok(())
                 })
                 .unwrap();
         });
 
-        leader_entered_rx.recv().unwrap(); // leader is now inside do_fsync, blocked
+        leader_entered_rx
+            .recv()
+            .unwrap(); // leader is now inside do_fsync, blocked
 
         let followers: Vec<_> = gens[1..]
             .iter()
@@ -205,11 +238,16 @@ mod tests {
         // pass trivially even if sharing were broken (followers just
         // wouldn't have started yet).
         thread::sleep(Duration::from_millis(50));
-        release_tx.send(()).unwrap();
+        release_tx
+            .send(())
+            .unwrap();
 
-        leader.join().unwrap();
+        leader
+            .join()
+            .unwrap();
         for f in followers {
-            f.join().unwrap();
+            f.join()
+                .unwrap();
         }
 
         assert_eq!(
@@ -234,7 +272,8 @@ mod tests {
 
         // A later commit for the same (still not durable) generation
         // retries and can succeed once the underlying problem is gone.
-        gc.commit(g1, || Ok(())).unwrap();
+        gc.commit(g1, || Ok(()))
+            .unwrap();
         assert_eq!(attempt.load(Ordering::Relaxed), 1);
     }
 }

@@ -71,7 +71,9 @@ fn bench_append_no_sync(c: &mut Criterion) {
                     for i in 0..100u32 {
                         let encoded =
                             format::encode_entry(format!("k{i}").as_bytes(), value, false, 0);
-                        active.append(black_box(&encoded)).unwrap();
+                        active
+                            .append(black_box(&encoded))
+                            .unwrap();
                     }
                     dir // keep alive until the batch is torn down
                 },
@@ -100,8 +102,12 @@ fn bench_append_with_sync(c: &mut Criterion) {
             },
             |(dir, mut active)| {
                 let encoded = format::encode_entry(b"key", &value, false, 0);
-                active.append(black_box(&encoded)).unwrap();
-                active.sync().unwrap();
+                active
+                    .append(black_box(&encoded))
+                    .unwrap();
+                active
+                    .sync()
+                    .unwrap();
                 dir
             },
             BatchSize::SmallInput,
@@ -119,12 +125,22 @@ fn bench_active_file_read_at(c: &mut Criterion) {
         let mut active = ActiveFile::create(&dir, 1).unwrap();
         let value = vec![0xEFu8; size];
         let encoded = format::encode_entry(b"key", &value, false, 0);
-        let (_, value_pos, _) = active.append(&encoded).unwrap();
-        active.sync().unwrap();
+        let (_, value_pos, _) = active
+            .append(&encoded)
+            .unwrap();
+        active
+            .sync()
+            .unwrap();
 
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.iter(|| black_box(active.read_at(value_pos, size as u32).unwrap()));
+            b.iter(|| {
+                black_box(
+                    active
+                        .read_at(value_pos, size as u32)
+                        .unwrap(),
+                )
+            });
         });
     }
     group.finish();
@@ -142,12 +158,18 @@ fn bench_data_file_set_read_at_cached(c: &mut Criterion) {
         let mut active = ActiveFile::create(&dir, 1).unwrap();
         let value = vec![0x11u8; size];
         let encoded = format::encode_entry(b"key", &value, false, 0);
-        let (file_id, value_pos, _) = active.append(&encoded).unwrap();
-        active.sync().unwrap();
+        let (file_id, value_pos, _) = active
+            .append(&encoded)
+            .unwrap();
+        active
+            .sync()
+            .unwrap();
         drop(active); // now immutable
 
         let files = DataFileSet::new(&*dir);
-        files.read_at(file_id, value_pos, size as u32).unwrap(); // warm the handle cache
+        files
+            .read_at(file_id, value_pos, size as u32)
+            .unwrap(); // warm the handle cache
 
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {

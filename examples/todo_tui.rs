@@ -40,28 +40,52 @@ struct Todo {
 }
 
 fn todo_key(id: u64) -> Vec<u8> {
-    id.to_string().into_bytes()
+    id.to_string()
+        .into_bytes()
 }
 
 /// `[done: u8][created_at: u32 LE][title: rest of the buffer, UTF-8]` — no
 /// delimiter to escape since `title` is always the last field.
 fn encode_todo(todo: &Todo) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(5 + todo.title.len());
+    let mut buf = Vec::with_capacity(
+        5 + todo
+            .title
+            .len(),
+    );
     buf.push(todo.done as u8);
-    buf.extend_from_slice(&todo.created_at.to_le_bytes());
-    buf.extend_from_slice(todo.title.as_bytes());
+    buf.extend_from_slice(
+        &todo
+            .created_at
+            .to_le_bytes(),
+    );
+    buf.extend_from_slice(
+        todo.title
+            .as_bytes(),
+    );
     buf
 }
 
 fn decode_todo(id: u64, bytes: &[u8]) -> Todo {
     let done = bytes[0] != 0;
-    let created_at = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+    let created_at = u32::from_le_bytes(
+        bytes[1..5]
+            .try_into()
+            .unwrap(),
+    );
     let title = String::from_utf8_lossy(&bytes[5..]).into_owned();
-    Todo { id, title, done, created_at }
+    Todo {
+        id,
+        title,
+        done,
+        created_at,
+    }
 }
 
 fn now_unix() -> u32 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as u32
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32
 }
 
 enum Mode {
@@ -83,7 +107,10 @@ impl App {
         let db = Engine::open(&dir, Options::default())?;
         let mut todos = db.fold(
             |key, value, mut acc: Vec<Todo>| {
-                if let Ok(id) = std::str::from_utf8(key).unwrap_or_default().parse::<u64>() {
+                if let Ok(id) = std::str::from_utf8(key)
+                    .unwrap_or_default()
+                    .parse::<u64>()
+                {
                     acc.push(decode_todo(id, value));
                 }
                 acc
@@ -91,7 +118,11 @@ impl App {
             Vec::new(),
         )?;
         todos.sort_by_key(|t| t.id);
-        let next_id = todos.iter().map(|t| t.id).max().map_or(0, |m| m + 1);
+        let next_id = todos
+            .iter()
+            .map(|t| t.id)
+            .max()
+            .map_or(0, |m| m + 1);
         Ok(Self {
             db,
             todos,
@@ -103,27 +134,48 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.todos.is_empty() {
+        if self
+            .todos
+            .is_empty()
+        {
             return;
         }
-        let len = self.todos.len() as isize;
+        let len = self
+            .todos
+            .len() as isize;
         let new = (self.selected as isize + delta).rem_euclid(len);
         self.selected = new as usize;
     }
 
     fn toggle_selected(&mut self) -> yabiir::Result<()> {
-        if let Some(todo) = self.todos.get_mut(self.selected) {
+        if let Some(todo) = self
+            .todos
+            .get_mut(self.selected)
+        {
             todo.done = !todo.done;
-            self.db.put(&todo_key(todo.id), &encode_todo(todo), now_unix())?;
+            self.db
+                .put(&todo_key(todo.id), &encode_todo(todo), now_unix())?;
         }
         Ok(())
     }
 
     fn delete_selected(&mut self) -> yabiir::Result<()> {
-        if self.selected < self.todos.len() {
-            let todo = self.todos.remove(self.selected);
-            self.db.delete(&todo_key(todo.id), now_unix())?;
-            if self.selected >= self.todos.len() && self.selected > 0 {
+        if self.selected
+            < self
+                .todos
+                .len()
+        {
+            let todo = self
+                .todos
+                .remove(self.selected);
+            self.db
+                .delete(&todo_key(todo.id), now_unix())?;
+            if self.selected
+                >= self
+                    .todos
+                    .len()
+                && self.selected > 0
+            {
                 self.selected -= 1;
             }
         }
@@ -131,7 +183,10 @@ impl App {
     }
 
     fn add_todo(&mut self, title: String) -> yabiir::Result<()> {
-        if title.trim().is_empty() {
+        if title
+            .trim()
+            .is_empty()
+        {
             return Ok(());
         }
         let todo = Todo {
@@ -140,10 +195,15 @@ impl App {
             done: false,
             created_at: now_unix(),
         };
-        self.db.put(&todo_key(todo.id), &encode_todo(&todo), now_unix())?;
+        self.db
+            .put(&todo_key(todo.id), &encode_todo(&todo), now_unix())?;
         self.next_id += 1;
-        self.todos.push(todo);
-        self.selected = self.todos.len() - 1;
+        self.todos
+            .push(todo);
+        self.selected = self
+            .todos
+            .len()
+            - 1;
         Ok(())
     }
 
@@ -156,7 +216,11 @@ impl App {
         .areas(frame.area());
 
         frame.render_widget(
-            Line::from(format!("yabiir todo — {} items", self.todos.len())),
+            Line::from(format!(
+                "yabiir todo — {} items",
+                self.todos
+                    .len()
+            )),
             header,
         );
 
@@ -169,10 +233,17 @@ impl App {
             })
             .collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Todos"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Todos"),
+            )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
         let mut state = ListState::default();
-        if !self.todos.is_empty() {
+        if !self
+            .todos
+            .is_empty()
+        {
             state.select(Some(self.selected));
         }
         frame.render_stateful_widget(list, body, &mut state);
@@ -217,11 +288,13 @@ impl App {
                 KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selected()?,
                 KeyCode::Char('d') => self.delete_selected()?,
                 KeyCode::Char('m') => {
-                    self.db.merge()?;
+                    self.db
+                        .merge()?;
                     self.status = Some("merged".to_string());
                 }
                 KeyCode::Char('s') => {
-                    self.db.sync()?;
+                    self.db
+                        .sync()?;
                     self.status = Some("synced".to_string());
                 }
                 _ => {}

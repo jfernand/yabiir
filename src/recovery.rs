@@ -27,7 +27,10 @@ use crate::keydir::{Keydir, KeydirEntry};
 /// already found a data file for. That's the "ignore it" plan §6.5 asks
 /// for, with no extra code needed to get it.
 pub fn recover(dir: &Path, file_ids: &[u32], keydir: &mut Keydir) -> io::Result<()> {
-    for (index, &file_id) in file_ids.iter().enumerate() {
+    for (index, &file_id) in file_ids
+        .iter()
+        .enumerate()
+    {
         let is_last = index + 1 == file_ids.len();
         let hint_path = DataFileSet::hint_path(dir, file_id);
         if hint_path.exists() {
@@ -41,17 +44,28 @@ pub fn recover(dir: &Path, file_ids: &[u32], keydir: &mut Keydir) -> io::Result<
 }
 
 fn apply_entry(keydir: &mut Keydir, file_id: u32, entry_start_pos: u64, entry: format::Entry) {
-    let value_pos = entry_start_pos + format::HEADER_SIZE as u64 + entry.header.key_size as u64;
-    if entry.header.tombstone {
+    let value_pos = entry_start_pos
+        + format::HEADER_SIZE as u64
+        + entry
+            .header
+            .key_size as u64;
+    if entry
+        .header
+        .tombstone
+    {
         keydir.remove(&entry.key);
     } else {
         keydir.insert(
             &entry.key,
             KeydirEntry {
                 file_id,
-                value_size: entry.header.value_size,
+                value_size: entry
+                    .header
+                    .value_size,
                 value_pos,
-                timestamp: entry.header.timestamp,
+                timestamp: entry
+                    .header
+                    .timestamp,
             },
         );
     }
@@ -163,7 +177,10 @@ mod tests {
                 "yabiir-recovery-test-{}-{}-{}",
                 std::process::id(),
                 n,
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
             ));
             fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -202,7 +219,9 @@ mod tests {
             value_size: value.len() as u32,
             tombstone,
         };
-        let (_, value_pos, total_len) = active.append(&encoded).unwrap();
+        let (_, value_pos, total_len) = active
+            .append(&encoded)
+            .unwrap();
         (value_pos, total_len, header)
     }
 
@@ -219,13 +238,17 @@ mod tests {
         let mut active0 = ActiveFile::create(&dir, 0).unwrap();
         write_entry(&dir, &mut active0, b"a", b"a-v1", false, 1);
         write_entry(&dir, &mut active0, b"b", b"b-v1", false, 2);
-        active0.sync().unwrap();
+        active0
+            .sync()
+            .unwrap();
         drop(active0);
 
         let mut active1 = ActiveFile::create(&dir, 1).unwrap();
         write_entry(&dir, &mut active1, b"a", b"a-v2", false, 3); // overwrites file 0's "a"
         write_entry(&dir, &mut active1, b"c", b"c-v1", false, 4);
-        active1.sync().unwrap();
+        active1
+            .sync()
+            .unwrap();
         drop(active1);
 
         let file_ids = DataFileSet::discover(&dir).unwrap();
@@ -234,9 +257,33 @@ mod tests {
         let mut keydir = Keydir::new();
         recover(&dir, &file_ids, &mut keydir).unwrap();
 
-        assert_eq!(read_value(&dir, keydir.get(b"a").unwrap()), b"a-v2");
-        assert_eq!(read_value(&dir, keydir.get(b"b").unwrap()), b"b-v1");
-        assert_eq!(read_value(&dir, keydir.get(b"c").unwrap()), b"c-v1");
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"a")
+                    .unwrap()
+            ),
+            b"a-v2"
+        );
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"b")
+                    .unwrap()
+            ),
+            b"b-v1"
+        );
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"c")
+                    .unwrap()
+            ),
+            b"c-v1"
+        );
         assert_eq!(keydir.len(), 3);
     }
 
@@ -250,7 +297,9 @@ mod tests {
         let mut active0 = ActiveFile::create(&dir, 0).unwrap();
         let (a_pos, _, a_header) = write_entry(&dir, &mut active0, b"a", b"a-v1", false, 1);
         let (b_pos, _, b_header) = write_entry(&dir, &mut active0, b"b", b"b-v1", false, 2);
-        active0.sync().unwrap();
+        active0
+            .sync()
+            .unwrap();
         drop(active0);
 
         // Hand-write file 0's hint file describing exactly what's in it.
@@ -264,16 +313,42 @@ mod tests {
         let mut active1 = ActiveFile::create(&dir, 1).unwrap();
         write_entry(&dir, &mut active1, b"a", b"a-v2", false, 3);
         write_entry(&dir, &mut active1, b"c", b"c-v1", false, 4);
-        active1.sync().unwrap();
+        active1
+            .sync()
+            .unwrap();
         drop(active1);
 
         let file_ids = DataFileSet::discover(&dir).unwrap();
         let mut keydir = Keydir::new();
         recover(&dir, &file_ids, &mut keydir).unwrap();
 
-        assert_eq!(read_value(&dir, keydir.get(b"a").unwrap()), b"a-v2");
-        assert_eq!(read_value(&dir, keydir.get(b"b").unwrap()), b"b-v1");
-        assert_eq!(read_value(&dir, keydir.get(b"c").unwrap()), b"c-v1");
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"a")
+                    .unwrap()
+            ),
+            b"a-v2"
+        );
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"b")
+                    .unwrap()
+            ),
+            b"b-v1"
+        );
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"c")
+                    .unwrap()
+            ),
+            b"c-v1"
+        );
         assert_eq!(keydir.len(), 3);
     }
 
@@ -284,12 +359,16 @@ mod tests {
         write_entry(&dir, &mut active, b"a", b"a-v1", false, 1);
         write_entry(&dir, &mut active, b"b", b"b-v1", false, 2);
         let (_, last_total_len, _) = write_entry(&dir, &mut active, b"c", b"c-v1", false, 3);
-        active.sync().unwrap();
+        active
+            .sync()
+            .unwrap();
         drop(active);
 
         // Truncate a few bytes into the last entry's value.
         let path = DataFileSet::data_path(&dir, 0);
-        let full_len = fs::metadata(&path).unwrap().len();
+        let full_len = fs::metadata(&path)
+            .unwrap()
+            .len();
         let new_len = full_len - (last_total_len.min(3));
         OpenOptions::new()
             .write(true)
@@ -302,8 +381,24 @@ mod tests {
         let mut keydir = Keydir::new();
         recover(&dir, &file_ids, &mut keydir).unwrap(); // must not error
 
-        assert_eq!(read_value(&dir, keydir.get(b"a").unwrap()), b"a-v1");
-        assert_eq!(read_value(&dir, keydir.get(b"b").unwrap()), b"b-v1");
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"a")
+                    .unwrap()
+            ),
+            b"a-v1"
+        );
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"b")
+                    .unwrap()
+            ),
+            b"b-v1"
+        );
         assert_eq!(keydir.get(b"c"), None); // torn write, correctly dropped
     }
 
@@ -314,27 +409,53 @@ mod tests {
         write_entry(&dir, &mut active, b"a", b"a-v1", false, 1);
         let (b_pos, _, _) = write_entry(&dir, &mut active, b"b", b"b-v1", false, 2);
         write_entry(&dir, &mut active, b"c", b"c-v1", false, 3);
-        active.sync().unwrap();
+        active
+            .sync()
+            .unwrap();
         drop(active);
 
         // Flip a bit inside "b"'s value bytes — CRC will no longer match.
         let path = DataFileSet::data_path(&dir, 0);
-        let mut f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
-        f.seek(SeekFrom::Start(b_pos)).unwrap();
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(SeekFrom::Start(b_pos))
+            .unwrap();
         let mut byte = [0u8; 1];
-        f.read_exact(&mut byte).unwrap();
+        f.read_exact(&mut byte)
+            .unwrap();
         byte[0] ^= 0xFF;
-        f.seek(SeekFrom::Start(b_pos)).unwrap();
-        f.write_all(&byte).unwrap();
+        f.seek(SeekFrom::Start(b_pos))
+            .unwrap();
+        f.write_all(&byte)
+            .unwrap();
         drop(f);
 
         let file_ids = DataFileSet::discover(&dir).unwrap();
         let mut keydir = Keydir::new();
         recover(&dir, &file_ids, &mut keydir).unwrap();
 
-        assert_eq!(read_value(&dir, keydir.get(b"a").unwrap()), b"a-v1");
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"a")
+                    .unwrap()
+            ),
+            b"a-v1"
+        );
         assert_eq!(keydir.get(b"b"), None); // corrupt entry skipped, not applied
-        assert_eq!(read_value(&dir, keydir.get(b"c").unwrap()), b"c-v1");
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"c")
+                    .unwrap()
+            ),
+            b"c-v1"
+        );
     }
 
     #[test]
@@ -360,11 +481,15 @@ mod tests {
         let mut active0 = ActiveFile::create(&dir, 0).unwrap();
         write_entry(&dir, &mut active0, b"a", b"a-v1", false, 1);
         let (_, last_total_len, _) = write_entry(&dir, &mut active0, b"b", b"b-v1", false, 2);
-        active0.sync().unwrap();
+        active0
+            .sync()
+            .unwrap();
         drop(active0);
 
         let path0 = DataFileSet::data_path(&dir, 0);
-        let full_len = fs::metadata(&path0).unwrap().len();
+        let full_len = fs::metadata(&path0)
+            .unwrap()
+            .len();
         OpenOptions::new()
             .write(true)
             .open(&path0)
@@ -374,15 +499,33 @@ mod tests {
 
         let mut active1 = ActiveFile::create(&dir, 1).unwrap();
         write_entry(&dir, &mut active1, b"c", b"c-v1", false, 3);
-        active1.sync().unwrap();
+        active1
+            .sync()
+            .unwrap();
         drop(active1);
 
         let file_ids = DataFileSet::discover(&dir).unwrap();
         let mut keydir = Keydir::new();
         recover(&dir, &file_ids, &mut keydir).unwrap();
 
-        assert_eq!(read_value(&dir, keydir.get(b"a").unwrap()), b"a-v1");
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"a")
+                    .unwrap()
+            ),
+            b"a-v1"
+        );
         assert_eq!(keydir.get(b"b"), None);
-        assert_eq!(read_value(&dir, keydir.get(b"c").unwrap()), b"c-v1");
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"c")
+                    .unwrap()
+            ),
+            b"c-v1"
+        );
     }
 }

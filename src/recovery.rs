@@ -86,7 +86,7 @@ fn scan_data_file(path: &Path, file_id: u32, is_last: bool, keydir: &mut Keydir)
             None => break, // clean EOF exactly at an entry boundary — done
             Some(EntryRead::Truncated) => {
                 if !is_last {
-                    eprintln!(
+                    crate::log::warn!(
                         "warning: {} has a truncated entry at offset {pos} but is not \
                          the most recently active file — possible corruption",
                         path.display()
@@ -99,7 +99,7 @@ fn scan_data_file(path: &Path, file_id: u32, is_last: bool, keydir: &mut Keydir)
                 pos += total_len;
             }
             Some(EntryRead::CrcMismatch { total_len }) => {
-                eprintln!(
+                crate::log::warn!(
                     "warning: {} has a corrupt entry at offset {pos} (CRC mismatch), skipping it",
                     path.display()
                 );
@@ -122,7 +122,7 @@ fn scan_hint_file(path: &Path, file_id: u32, keydir: &mut Keydir) -> io::Result<
                 // Shouldn't happen for a hint file written by a completed
                 // merge, but handle it the same way as a truncated data
                 // file tail: stop, keep what was already recovered.
-                eprintln!(
+                crate::log::warn!(
                     "warning: {} has a truncated hint record, stopping scan there",
                     path.display()
                 );

@@ -15,6 +15,8 @@ Sheehy & Smith's 2010 paper (included locally at [`docs/papers/bitcask-intro.pdf
   traffic
 - A process-level single-writer lock, so two writable (`is_read_write: true`) handles can't corrupt the same directory
 - A small CLI (`kv`) and a synthetic load generator (`loadtest`) for exercising it
+- Optional observability: `put`/`get`/`delete`/`merge`/`sync` call durations via `Options::metrics`, and structured
+  logging/spans via the `tracing` feature — see [Observability](#observability)
 
 ## Quick start
 
@@ -80,6 +82,23 @@ Full design writeups — including the profiling methodology and measured before
   Note that `benches/merge.rs` fixes `max_file_size: 1` to control the live/dead entry ratio precisely, which as a
   side effect forces a rotation (and its fsync) on every entry — so it can't isolate the flush-batching behavior
   above; that's covered by unit tests and `loadtest` instead.
+
+## Observability
+
+The crate stays backend-agnostic by default — no metrics or logging dependency is forced on you — but exposes two
+opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
+
+- **Metrics**: implement the `Metrics` trait (`record_put`/`record_get`/`record_delete`/`record_merge`/`record_sync`,
+  each given the call's duration; every method has an empty default body, so implement only what you need) and pass
+  it via `Options::metrics: Option<Arc<dyn Metrics>>`. Leaving it `None` (the default) records nothing.
+- **Structured logging and merge spans**: enable the `tracing` feature (`yabiir = { version = "...", features =
+  ["tracing"] }`) to route the crate's warnings (truncated/corrupt entries found during recovery or merge) through
+  `tracing::warn!` instead of `eprintln!`, and wrap merge's phases (scan, copy-forward, flush, remove old input
+  files) in `tracing` spans. Without the feature, warnings still go to stderr via `eprintln!` — nothing is silently
+  dropped either way.
+
+[`examples/bsky_firehose.rs`](examples/bsky_firehose.rs) wires up a `Metrics` implementation and renders it as a live
+`ratatui` dashboard alongside its own application-level stats — a working example of both hooks together.
 
 ## Known limitations
 

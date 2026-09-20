@@ -1,12 +1,15 @@
+use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::Result;
+use crate::metrics::Metrics;
 
 /// Tuning/mode knobs for opening a [`Bitcask`] datastore.
 ///
 /// See `docs/bitcask-implementation-plan.md` §9 for the rationale behind
 /// each field.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Options {
     /// Open for reading and writing (`true`) or read-only (`false`).
     /// Only one `read_write` handle may be open on a given directory at a
@@ -17,6 +20,9 @@ pub struct Options {
     /// Size (bytes) at which the active file is rotated and a new one
     /// started.
     pub max_file_size: u64,
+    /// Observe `put`/`get`/`delete`/`merge`/`sync` call durations — `None`
+    /// (the default) records nothing. See [`Metrics`].
+    pub metrics: Option<Arc<dyn Metrics>>,
 }
 
 impl Default for Options {
@@ -25,7 +31,28 @@ impl Default for Options {
             is_read_write: true,
             should_sync_on_put: false,
             max_file_size: 64 * 1024 * 1024,
+            metrics: None,
         }
+    }
+}
+
+// Hand-written: `dyn Metrics` has no reason to require `Debug` of its own
+// (it's a handful of duration-recording callbacks, not data to print), so
+// `#[derive(Debug)]` doesn't apply here.
+impl fmt::Debug for Options {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Options")
+            .field("is_read_write", &self.is_read_write)
+            .field("should_sync_on_put", &self.should_sync_on_put)
+            .field("max_file_size", &self.max_file_size)
+            .field(
+                "metrics",
+                &self
+                    .metrics
+                    .as_ref()
+                    .map_or("None", |_| "Some(..)"),
+            )
+            .finish()
     }
 }
 

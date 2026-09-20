@@ -22,6 +22,8 @@
 use std::collections::VecDeque;
 use std::io::Cursor as IoCursor;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use atrium_api::app::bsky::feed::post::RecordData as PostRecordData;
@@ -35,7 +37,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use yabiir::{Bitcask, Engine, Options, now_unix};
+use yabiir::{Bitcask, Engine, Metrics, Options, now_unix};
 
 const FIREHOSE_URL: &str = "wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos";
 const POST_COLLECTION: &str = "app.bsky.feed.post";
@@ -43,6 +45,15 @@ const POST_COLLECTION: &str = "app.bsky.feed.post";
 /// history scrolling by.
 const HISTORY_LEN: usize = 120;
 const LOG_LEN: usize = 200;
+/// How often (in ticks, i.e. seconds) to run a background `merge` + `sync`
+/// — nothing in this example otherwise ever calls either, and the whole
+/// point of wiring up `yabiir::Metrics` here is to have something real to
+/// show for `record_merge`/`record_sync`. Merge on a modest local dataset
+/// finishes well under a second (see docs/merge-batched-flushing.typ), so
+/// blocking the event loop briefly every 30s is an acceptable demo
+/// tradeoff, not something a production consumer should copy as-is — a
+/// real one would run this via `tokio::task::spawn_blocking`.
+const MERGE_INTERVAL_TICKS: u32 = 30;
 
 /// The two-value framing every firehose message uses: a header naming the
 /// message type (only meaningful when `op == 1`; `op == -1` is an error
@@ -138,8 +149,115 @@ impl Metric {
     }
 }
 
+/// A `yabiir::Metrics` implementation: just running totals (count + summed
+/// nanoseconds) per operation kind, cheap enough to update on every call —
+/// `docs/ROADMAP.md` §4's metrics hook, with somewhere real to plug it in.
+#[derive(Default)]
+struct EngineMetricsCollector {
+    put_count: AtomicU64,
+    put_nanos: AtomicU64,
+    get_count: AtomicU64,
+    get_nanos: AtomicU64,
+    delete_count: AtomicU64,
+    delete_nanos: AtomicU64,
+    merge_count: AtomicU64,
+    merge_nanos: AtomicU64,
+    sync_count: AtomicU64,
+    sync_nanos: AtomicU64,
+}
+
+impl EngineMetricsCollector {
+    fn record(count: &AtomicU64, nanos: &AtomicU64, duration: Duration) {
+        count.fetch_add(1, Ordering::Relaxed);
+        nanos.fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    /// `(count, average nanoseconds per call)` — an all-time average, not a
+    /// per-tick one; fine for `merge`/`sync`, which fire too rarely for a
+    /// per-second rate to mean much anyway.
+    fn snapshot(count: &AtomicU64, nanos: &AtomicU64) -> (u64, u64) {
+        let count = count.load(Ordering::Relaxed);
+        let nanos = nanos.load(Ordering::Relaxed);
+        (
+            count,
+            nanos
+                .checked_div(count)
+                .unwrap_or(0),
+        )
+    }
+}
+
+impl Metrics for EngineMetricsCollector {
+    fn record_put(&self, duration: Duration) {
+        Self::record(&self.put_count, &self.put_nanos, duration);
+    }
+    fn record_get(&self, duration: Duration) {
+        Self::record(&self.get_count, &self.get_nanos, duration);
+    }
+    fn record_delete(&self, duration: Duration) {
+        Self::record(&self.delete_count, &self.delete_nanos, duration);
+    }
+    fn record_merge(&self, duration: Duration) {
+        Self::record(&self.merge_count, &self.merge_nanos, duration);
+    }
+    fn record_sync(&self, duration: Duration) {
+        Self::record(&self.sync_count, &self.sync_nanos, duration);
+    }
+}
+
+/// A running sparkline of `EngineMetricsCollector`'s per-tick *average
+/// latency* (not throughput) for one operation kind — reads the
+/// collector's cumulative (count, nanos) each tick and charts the delta's
+/// average, the same per-tick-history shape `Metric` uses for throughput.
+struct LatencyMetric {
+    label: &'static str,
+    last_count: u64,
+    last_nanos: u64,
+    history: VecDeque<u64>, // average nanoseconds per call, per tick
+}
+
+impl LatencyMetric {
+    fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            last_count: 0,
+            last_nanos: 0,
+            history: VecDeque::with_capacity(HISTORY_LEN),
+        }
+    }
+
+    fn tick(&mut self, count: u64, nanos: u64) {
+        let delta_count = count.saturating_sub(self.last_count);
+        let delta_nanos = nanos.saturating_sub(self.last_nanos);
+        let avg_ns = delta_nanos
+            .checked_div(delta_count)
+            .unwrap_or(0);
+        self.last_count = count;
+        self.last_nanos = nanos;
+        if self
+            .history
+            .len()
+            >= HISTORY_LEN
+        {
+            self.history
+                .pop_front();
+        }
+        self.history
+            .push_back(avg_ns);
+    }
+
+    fn last_rate_us(&self) -> u64 {
+        self.history
+            .back()
+            .copied()
+            .unwrap_or(0)
+            / 1000
+    }
+}
+
 struct App {
     db: Engine,
+    engine_metrics: Arc<EngineMetricsCollector>,
     started: Instant,
     frames: Metric,
     stored: Metric,
@@ -149,18 +267,25 @@ struct App {
     /// deliberately doesn't act on, bucketed into one counter so it's still
     /// visible that the firehose carries far more than just posts.
     skipped: Metric,
+    put_latency: LatencyMetric,
+    delete_latency: LatencyMetric,
+    ticks_since_merge: u32,
     log: VecDeque<String>,
 }
 
 impl App {
-    fn new(db: Engine) -> Self {
+    fn new(db: Engine, engine_metrics: Arc<EngineMetricsCollector>) -> Self {
         Self {
             db,
+            engine_metrics,
             started: Instant::now(),
             frames: Metric::new("Frames/s"),
             stored: Metric::new("Posts stored/s"),
             deleted: Metric::new("Posts deleted/s"),
             skipped: Metric::new("Skipped/s"),
+            put_latency: LatencyMetric::new("Put latency"),
+            delete_latency: LatencyMetric::new("Delete latency"),
+            ticks_since_merge: 0,
             log: VecDeque::with_capacity(LOG_LEN),
         }
     }
@@ -174,6 +299,40 @@ impl App {
             .tick();
         self.skipped
             .tick();
+
+        self.put_latency
+            .tick(
+                self.engine_metrics
+                    .put_count
+                    .load(Ordering::Relaxed),
+                self.engine_metrics
+                    .put_nanos
+                    .load(Ordering::Relaxed),
+            );
+        self.delete_latency
+            .tick(
+                self.engine_metrics
+                    .delete_count
+                    .load(Ordering::Relaxed),
+                self.engine_metrics
+                    .delete_nanos
+                    .load(Ordering::Relaxed),
+            );
+
+        self.ticks_since_merge += 1;
+        if self.ticks_since_merge >= MERGE_INTERVAL_TICKS {
+            self.ticks_since_merge = 0;
+            match self
+                .db
+                .merge()
+                .and_then(|()| {
+                    self.db
+                        .sync()
+                }) {
+                Ok(()) => self.log("(background merge + sync completed)".to_string()),
+                Err(err) => self.log(format!("warning: background merge/sync failed: {err}")),
+            }
+        }
     }
 
     fn log(&mut self, line: String) {
@@ -328,10 +487,20 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        let [header, totals, charts, log, footer] = Layout::vertical([
+        let [
+            header,
+            totals,
+            charts,
+            engine_totals,
+            engine_charts,
+            log,
+            footer,
+        ] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(16),
+            Constraint::Length(1),
+            Constraint::Length(10),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
@@ -389,6 +558,75 @@ impl App {
             frame.render_widget(sparkline, *area);
         }
 
+        // The yabiir engine's own observability hooks (docs/ROADMAP.md §4),
+        // on top of this app's bsky-specific stats above: Options::metrics
+        // (EngineMetricsCollector, this file) feeds these directly.
+        let (merge_count, merge_avg_ns) = EngineMetricsCollector::snapshot(
+            &self
+                .engine_metrics
+                .merge_count,
+            &self
+                .engine_metrics
+                .merge_nanos,
+        );
+        let (sync_count, sync_avg_ns) = EngineMetricsCollector::snapshot(
+            &self
+                .engine_metrics
+                .sync_count,
+            &self
+                .engine_metrics
+                .sync_nanos,
+        );
+        let (get_count, get_avg_ns) = EngineMetricsCollector::snapshot(
+            &self
+                .engine_metrics
+                .get_count,
+            &self
+                .engine_metrics
+                .get_nanos,
+        );
+        frame.render_widget(
+            Line::from(format!(
+                "engine: puts avg {}µs   deletes avg {}µs   gets: {get_count} (avg {}µs)   \
+                 merges: {merge_count} (avg {}ms)   syncs: {sync_count} (avg {}ms)",
+                self.put_latency
+                    .last_rate_us(),
+                self.delete_latency
+                    .last_rate_us(),
+                get_avg_ns / 1000,
+                merge_avg_ns / 1_000_000,
+                sync_avg_ns / 1_000_000,
+            )),
+            engine_totals,
+        );
+
+        let engine_chart_areas: [_; 2] =
+            Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+                .areas(engine_charts);
+        for (area, latency) in engine_chart_areas
+            .iter()
+            .zip([&self.put_latency, &self.delete_latency])
+        {
+            let data: Vec<u64> = latency
+                .history
+                .iter()
+                .map(|ns| ns / 1000) // ns -> µs for display
+                .collect();
+            let sparkline = Sparkline::default()
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(
+                            "{} ({}µs avg)",
+                            latency.label,
+                            latency.last_rate_us()
+                        )),
+                )
+                .data(&data)
+                .style(Style::default().fg(Color::Yellow));
+            frame.render_widget(sparkline, *area);
+        }
+
         let items: Vec<ListItem> = self
             .log
             .iter()
@@ -424,13 +662,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("yabiir-bsky-firehose"));
-    let db = Engine::open(&dir, Options::default())?;
+    let engine_metrics = Arc::new(EngineMetricsCollector::default());
+    let db = Engine::open(
+        &dir,
+        Options {
+            metrics: Some(engine_metrics.clone() as Arc<dyn Metrics>),
+            ..Options::default()
+        },
+    )?;
 
     let (ws, _response) = tokio_tungstenite::connect_async(FIREHOSE_URL).await?;
     let (_write, mut read) = ws.split();
 
     let mut terminal = ratatui::init();
-    let mut app = App::new(db);
+    let mut app = App::new(db, engine_metrics);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
 

@@ -7,8 +7,9 @@
 //! [`crate::lock`] when `read_write` is set (plan §8.1).
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::api::{Bitcask, Options};
 use crate::commit::GroupCommit;
@@ -18,6 +19,7 @@ use crate::format;
 use crate::keydir::{Keydir, KeydirEntry, SharedKeydir};
 use crate::lock::DirLock;
 use crate::merge;
+use crate::metrics::{Metrics, NoopMetrics};
 use crate::recovery;
 
 /// Concrete single-process Bitcask engine. See the module docs above for
@@ -41,6 +43,11 @@ pub struct Engine {
     /// simple; only ever touched when `sync_on_put` is set.
     group_commit: GroupCommit,
     next_file_id: AtomicU32,
+    /// Resolved once at `open()` time from `opts.metrics` — `NoopMetrics`
+    /// when the caller didn't provide one, so every call site can just
+    /// unconditionally call into it rather than branching on `Option` each
+    /// time. See `src/metrics.rs`.
+    metrics: Arc<dyn Metrics>,
     opts: Options,
     /// Held for the lifetime of a `read_write` handle; releases the OS
     /// `flock` automatically on drop. `None` for a read-only handle, which
@@ -219,6 +226,11 @@ impl Bitcask for Engine {
             None
         };
 
+        let metrics: Arc<dyn Metrics> = opts
+            .metrics
+            .clone()
+            .unwrap_or_else(|| Arc::new(NoopMetrics));
+
         Ok(Self {
             files: DataFileSet::new(&dir),
             dir,
@@ -226,19 +238,24 @@ impl Bitcask for Engine {
             active,
             group_commit: GroupCommit::new(),
             next_file_id: AtomicU32::new(next_id + 1),
+            metrics,
             opts,
             _write_lock: write_lock,
         })
     }
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        match self
+        let start = Instant::now();
+        let value = match self
             .keydir
             .get(key)
         {
-            Some(entry) => Ok(Some(self.read_value(entry)?)),
-            None => Ok(None),
-        }
+            Some(entry) => Some(self.read_value(entry)?),
+            None => None,
+        };
+        self.metrics
+            .record_get(start.elapsed());
+        Ok(value)
     }
 
     fn put(&self, key: &[u8], value: &[u8], timestamp: u32) -> Result<()> {
@@ -246,6 +263,7 @@ impl Bitcask for Engine {
             return Err(Error::EmptyKey);
         }
         self.require_write()?;
+        let start = Instant::now();
 
         let encoded = format::encode_entry(key, value, false, timestamp);
         let (file_id, value_pos) = self.append(&encoded)?;
@@ -259,6 +277,8 @@ impl Bitcask for Engine {
                     timestamp,
                 },
             );
+        self.metrics
+            .record_put(start.elapsed());
         Ok(())
     }
 
@@ -267,18 +287,23 @@ impl Bitcask for Engine {
             return Err(Error::EmptyKey);
         }
         self.require_write()?;
+        let start = Instant::now();
 
         if self
             .keydir
             .get(key)
             .is_none()
         {
+            self.metrics
+                .record_delete(start.elapsed());
             return Ok(()); // deleting a non-existent key is a no-op
         }
         let encoded = format::encode_entry(key, &[], true, timestamp);
         self.append(&encoded)?;
         self.keydir
             .remove(key);
+        self.metrics
+            .record_delete(start.elapsed());
         Ok(())
     }
 
@@ -309,7 +334,8 @@ impl Bitcask for Engine {
             .active
             .as_ref()
             .ok_or(Error::ReadOnly)?;
-        merge::merge(
+        let start = Instant::now();
+        let result = merge::merge(
             &self.dir,
             &self.keydir,
             &self.files,
@@ -318,15 +344,23 @@ impl Bitcask for Engine {
             &self.next_file_id,
             self.opts
                 .max_file_size,
-        )
+        );
+        if result.is_ok() {
+            self.metrics
+                .record_merge(start.elapsed());
+        }
+        result
     }
 
     fn sync(&self) -> Result<()> {
         if let Some(active) = &self.active {
+            let start = Instant::now();
             active
                 .lock()
                 .expect("Active file access no loner safe (mutex poisoned); exiting")
                 .sync()?;
+            self.metrics
+                .record_sync(start.elapsed());
         }
         Ok(())
     }
@@ -1039,6 +1073,123 @@ mod tests {
             db.get(b"new-key")
                 .unwrap(),
             Some(b"new-value".to_vec())
+        );
+    }
+
+    /// A test `Metrics` implementation counting how many times each
+    /// callback fired — proves `Engine` actually calls into a caller-
+    /// supplied `Metrics`, not just that `Options::metrics` compiles.
+    #[derive(Default)]
+    struct CountingMetrics {
+        puts: AtomicU64,
+        gets: AtomicU64,
+        deletes: AtomicU64,
+        merges: AtomicU64,
+        syncs: AtomicU64,
+    }
+
+    impl crate::Metrics for CountingMetrics {
+        fn record_put(&self, _duration: std::time::Duration) {
+            self.puts
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        fn record_get(&self, _duration: std::time::Duration) {
+            self.gets
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        fn record_delete(&self, _duration: std::time::Duration) {
+            self.deletes
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        fn record_merge(&self, _duration: std::time::Duration) {
+            self.merges
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        fn record_sync(&self, _duration: std::time::Duration) {
+            self.syncs
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn metrics_are_recorded_for_every_op_kind() {
+        let dir = TempDir::new();
+        let metrics = std::sync::Arc::new(CountingMetrics::default());
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 1, // every put rotates — guarantees merge has something to do
+                metrics: Some(metrics.clone() as std::sync::Arc<dyn crate::Metrics>),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+
+        db.put(b"a", b"1", now_unix())
+            .unwrap();
+        db.put(b"b", b"2", now_unix())
+            .unwrap();
+        assert_eq!(
+            db.get(b"a")
+                .unwrap(),
+            Some(b"1".to_vec())
+        );
+        db.get(b"missing")
+            .unwrap(); // a miss still counts as a get
+        db.delete(b"a", now_unix())
+            .unwrap();
+        db.delete(b"missing", now_unix())
+            .unwrap(); // no-op delete still counts
+        db.merge()
+            .unwrap();
+        db.sync()
+            .unwrap();
+
+        assert_eq!(
+            metrics
+                .puts
+                .load(AtomicOrdering::Relaxed),
+            2
+        );
+        assert_eq!(
+            metrics
+                .gets
+                .load(AtomicOrdering::Relaxed),
+            2
+        );
+        assert_eq!(
+            metrics
+                .deletes
+                .load(AtomicOrdering::Relaxed),
+            2
+        );
+        assert_eq!(
+            metrics
+                .merges
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .syncs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+    }
+
+    /// With no `Options::metrics` set, `Engine` falls back to a no-op —
+    /// this just has to not panic or misbehave, exercising the `unwrap_or_else`
+    /// path in `open()` that a metrics-less `Options::default()` always takes.
+    #[test]
+    fn engine_works_normally_with_no_metrics_configured() {
+        let dir = TempDir::new();
+        let db = open(&dir);
+        db.put(b"k", b"v", now_unix())
+            .unwrap();
+        assert_eq!(
+            db.get(b"k")
+                .unwrap(),
+            Some(b"v".to_vec())
         );
     }
 }

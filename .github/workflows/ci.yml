@@ -29,6 +29,19 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
+      # The optional `tracing` feature (structured logging/spans, see
+      # docs/ROADMAP.md §4) changes what compiles — check it separately
+      # from the default-features build above, not just once combined.
+      - run: cargo clippy --all-targets --features tracing -- -D warnings
+
+  test-tracing-feature:
+    name: test (tracing feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features tracing
 
   test:
     name: test (${{ matrix.os }})

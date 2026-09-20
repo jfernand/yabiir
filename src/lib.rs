@@ -9,7 +9,9 @@ mod error;
 pub mod format;
 pub mod keydir;
 mod lock;
+mod log;
 mod merge;
+mod metrics;
 mod recovery;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use api::{Bitcask, Options};
 pub use engine::Engine;
 pub use error::{Error, Result};
+pub use metrics::Metrics;
 
 pub fn now_unix() -> u32 {
     SystemTime::now()

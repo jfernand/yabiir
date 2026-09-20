@@ -161,13 +161,31 @@ pub(crate) fn merge_with_repoint_hook(
         &mut pending,
         &mut before_repoint,
     )?;
-    writer.finish()?; // flushes + fsyncs whatever's left in the final batch
-    apply_pending_repoints(keydir, &mut pending, &mut before_repoint);
+    finish_and_apply_pending_repoints(keydir, writer, &mut pending, &mut before_repoint)?;
 
     remove_old_input_files(dir, files, &input_ids);
 
     restore_active_file(dir, active, group_commit, next_file_id, highest_output_id)?;
 
+    Ok(())
+}
+
+/// "Flush" phase: fsync whatever's left in the final (possibly partial)
+/// batch, then repoint the keydir for every entry that batch covers — see
+/// this module's doc comment on batched flushing for why finishing and
+/// repointing are done together, in this order.
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(skip_all, name = "merge::flush")
+)]
+fn finish_and_apply_pending_repoints(
+    keydir: &SharedKeydir,
+    writer: MergeOutputWriter,
+    pending: &mut PendingQueue,
+    before_repoint: &mut impl FnMut(&[u8]),
+) -> io::Result<()> {
+    writer.finish()?;
+    apply_pending_repoints(keydir, pending, before_repoint);
     Ok(())
 }
 
@@ -198,6 +216,10 @@ fn restore_active_file(
     Ok(())
 }
 
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(skip_all, name = "merge::copy_forward")
+)]
 fn copy_forward_all_live_entries(
     dir: &Path,
     keydir: &SharedKeydir,
@@ -222,6 +244,10 @@ fn copy_forward_all_live_entries(
     Ok(())
 }
 
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(skip_all, name = "merge::remove_old_input_files")
+)]
 fn remove_old_input_files(dir: &Path, files: &DataFileSet, input_ids: &Vec<u32>) {
     // 4. Remove the old input files now that nothing in the keydir points
     //    at them anymore: every key that was live in them now points at
@@ -280,6 +306,10 @@ fn copy_forward_live_file_entries(
     Ok(())
 }
 
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(skip_all, name = "merge::scan")
+)]
 fn collect_input_ids(dir: &Path, active: &Mutex<ActiveFile>) -> io::Result<Vec<u32>> {
     // 1. Snapshot which files are eligible: everything except the current
     //    active file at the moment merge starts. Files created by rotation
@@ -326,7 +356,7 @@ fn read_all_entries(path: &Path) -> io::Result<Vec<(u64, Entry)>> {
         match format::read_entry(&mut f)? {
             None => break,
             Some(EntryRead::Truncated) => {
-                eprintln!(
+                crate::log::warn!(
                     "warning: {} has a truncated entry at offset {pos} during merge — \
                      unexpected for an already-closed file, possible corruption",
                     path.display()
@@ -338,7 +368,7 @@ fn read_all_entries(path: &Path) -> io::Result<Vec<(u64, Entry)>> {
                 pos += total_len;
             }
             Some(EntryRead::CrcMismatch { total_len }) => {
-                eprintln!(
+                crate::log::warn!(
                     "warning: {} has a corrupt entry at offset {pos} (CRC mismatch) \
                      during merge, skipping it",
                     path.display()

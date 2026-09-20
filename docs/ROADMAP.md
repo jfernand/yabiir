@@ -32,6 +32,22 @@ under `should_sync_on_put: true` is durable against a true power loss is laid ou
 `.typ` design reports, but nothing today actually pulls power (or simulates it, e.g. with block-layer fault
 injection) to confirm it. That reasoning has never been checked against reality.
 
+Where to start: the cheapest, most self-contained piece is making the keydir's hasher swappable — a `#[cfg(feature =
+"dst")]` build that uses `BTreeMap` or a fixed-seed `RandomState` instead of the production default, with no file
+system work required, is a small enough change to land on its own and start proving out the approach. The file
+system abstraction is the harder, structural piece, and could be scoped down to just `datafile.rs` first (the path
+everything else depends on) rather than `lock.rs` and `recovery.rs` too. It's also worth checking, before committing
+to `madsim` or `turmoil`, whether either actually fits a synchronous, thread-based engine like this one — both are
+built around async network services; `loom` (already a known gap for `src/keydir.rs`) or `shuttle` may be a closer
+match for exhaustively exploring thread interleavings here, and a hand-rolled fault-injecting file system driven by
+proptest-generated fault schedules may cover the disk side without needing a full simulator at all. Jepsen-style
+testing doesn't require the Jepsen/Clojure stack specifically — a purpose-built harness that drives the `kv` CLI (or
+a thin wrapper around `Engine`) from one process while a supervisor `kill -9`s it at random points and checks
+recovered state against a logged history of acknowledged operations would answer the same question, and could start
+as a new `xtask` subcommand or its own test crate. Power failure testing is the one item here with no cheap starting
+point — the realistic first step is Linux block-device fault injection (`dm-flakey`, or ALICE-style crash-consistency
+tooling) in a disposable VM, not literally pulling power.
+
 ## 2. Resilience and fault tolerance
 
 Crash recovery already exists and is tested for the ordinary case — kill the process, reopen, get back everything
@@ -51,6 +67,18 @@ behavior over a long-running process: the keydir allocates one `Box<[u8]>` per k
 a process that churns through many keys over weeks can fragment its heap in ways a short-lived test run never
 surfaces. Protecting against that likely means an arena or slab allocator for key storage, or a periodic
 rebuild-into-a-fresh-map pass, rather than leaving it to whatever the system allocator happens to do.
+
+Where to start: the ordering gap has a clear, test-first path — write a regression test that reproduces it (a key
+written truly concurrently with a merge touching it, followed by a reopen, matching the scenario already described
+in `src/merge/mod.rs`'s module doc), confirm it fails today, then design the rename-based fix against that failing
+test, the same way every fix landed during this project's mutation-testing and group-commit work was verified.
+Backpressure has a cheap version and a more thorough one: capping `put`/`delete` (block, or return an error) once
+the count of un-merged rotated files crosses a configurable threshold is a small, local change to `Engine::append`;
+having `Engine` schedule its own background merge automatically past a low-water mark, instead of leaving callers
+(like `loadtest`'s `--merge-interval-secs`) to manage timing themselves, is the more thorough version and a bigger
+change. Memory fragmentation is worth measuring before it's worth fixing — instrumenting a soak run (see §5) with
+periodic heap-size sampling would show whether this is a real problem in practice before investing in an arena
+allocator or a rebuild pass for a risk that might turn out to be negligible at realistic key counts.
 
 ## 3. Performance
 
@@ -75,6 +103,20 @@ current fixed interval clears. Splitting a merge pass into smaller, interruptibl
 backlog size instead of a fixed timer, would target that directly — it's the same problem as the backpressure item
 above, looked at from the latency side rather than the correctness side.
 
+Where to start: keydir sharding is the more contained of the two concurrency options — replacing `SharedKeydir`'s
+single `RwLock<Keydir>` with a fixed number of `RwLock<Keydir>` shards partitioned by a cheap hash of the key (16 or
+32 shards is a reasonable default to start benchmarking from) is a well-understood pattern with existing prior art
+(`dashmap`) to compare against directly. Multiple active files is a much larger, structural change — it touches
+on-disk file-id assignment, merge's input-file selection, and recovery ordering — and is worth deferring until
+sharding alone is shown insufficient by an actual benchmark, not assumed necessary up front. Likewise, `io_uring` and
+`mmap` shouldn't be the first move either: consistent with how every other performance fix here started (profile,
+then fix what profiling actually shows), the right first step is a `loadtest`/flamegraph run under enough concurrent
+I/O pressure to confirm syscall overhead is really the bottleneck before adopting either — `tokio-uring` or the
+`io-uring` crate for the write path, `memmap2` for reads, if it is. Incremental, resumable merge (process a bounded
+number of input files or entries per call, resumable across calls) is the smallest of the tail-latency options and
+worth trying before either full backpressure or a scheduler rewrite, since it's a change contained entirely within
+`merge/mod.rs`.
+
 ## 4. Observability
 
 There's currently no way to see any of this from outside the process. No counters for how many `put`/`get`/
@@ -92,6 +134,16 @@ the structure problem and also open the door to the more useful piece: spans aro
 copy-forward, flush, remove old files — so an operator can see which part of a slow merge pass was actually slow,
 instead of only the total duration a load generator measured from outside.
 
+Where to start: logging is the smallest, lowest-risk piece and doesn't need to wait for the rest — replacing the
+handful of `eprintln!` calls in `recovery.rs` and `merge/mod.rs` with `tracing::warn!` (or `log::warn!`), behind an
+optional feature so consumers who don't want the dependency aren't forced into it, is a mechanical change that could
+land on its own. Tracing spans around merge's phases are a natural follow-on once `tracing` is already a dependency
+for logging, not a separate effort. Metrics is the bigger design question: a small `Metrics` trait that `Engine`
+takes as an optional `Arc<dyn Metrics>` at `open()` time (defaulting to a no-op) keeps the crate itself
+backend-agnostic, matching how `format`/`datafile`/`keydir` are already `pub` "internal building blocks, not stable
+public API" rather than a fixed public surface — a `tracing`- or `metrics`-crate-backed adapter could ship as an
+example rather than a hard dependency.
+
 ## 5. Aging
 
 Everything measured so far has run against synthetic, uniformly-random keys and values, generated by `loadtest`
@@ -107,3 +159,12 @@ seconds, to catch what only shows up slowly — the keydir fragmentation risk me
 upward faster than merge can clear it, and `DataFileSet`'s read-handle cache, which today never evicts anything and
 is documented as relying on the assumption that "a real Bitcask directory has at most a few thousand files even at
 scale, thanks to merge." That's a reasonable assumption. It has never actually been tested.
+
+Where to start: soaking is the one item on this entire roadmap that's actionable today, with no new infrastructure —
+`loadtest` already takes an arbitrary `--duration-secs`, so running it unattended for a day or more (as a scheduled
+CI job, or just left running) is possible right now; the only real gap is that its periodic reporting doesn't yet
+sample memory use, file descriptor count, or merge backlog size over that kind of run, which would need adding to
+its existing reporting loop to actually see the slow-building problems this section cares about. Shadowing has to
+wait on a real deployment to shadow, which doesn't exist yet — the useful near-term step is narrower: teaching
+`loadtest` to replay a captured operation sequence (from a file) instead of only generating synthetic uniform-random
+traffic, so the tooling is ready the moment a real trace exists rather than needing to be built from scratch then.

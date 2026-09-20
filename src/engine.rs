@@ -1004,7 +1004,10 @@ mod tests {
             before_ids.len() > 1,
             "test needs multiple rotated files, got {before_ids:?}"
         );
-        let highest_before = *before_ids.iter().max().unwrap();
+        let highest_before = *before_ids
+            .iter()
+            .max()
+            .unwrap();
 
         let db = open(&dir);
         db.put(b"new-key", b"new-value", now_unix())
@@ -1014,7 +1017,10 @@ mod tests {
         // the first session — not a collision with (and silent corruption
         // of) an existing rotated-out file.
         let after_ids = DataFileSet::discover(&dir).unwrap();
-        let highest_after = *after_ids.iter().max().unwrap();
+        let highest_after = *after_ids
+            .iter()
+            .max()
+            .unwrap();
         assert!(
             highest_after > highest_before,
             "expected a new file id above {highest_before}, got {highest_after}"
@@ -1024,12 +1030,14 @@ mod tests {
         // silently corrupt whichever old file it reused.
         for i in 0..5u32 {
             assert_eq!(
-                db.get(format!("k{i}").as_bytes()).unwrap(),
+                db.get(format!("k{i}").as_bytes())
+                    .unwrap(),
                 Some(format!("v{i}").into_bytes())
             );
         }
         assert_eq!(
-            db.get(b"new-key").unwrap(),
+            db.get(b"new-key")
+                .unwrap(),
             Some(b"new-value".to_vec())
         );
     }

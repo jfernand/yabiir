@@ -82,7 +82,7 @@ impl Keydir {
             .is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item=(&[u8], &KeydirEntry)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &KeydirEntry)> {
         self.map
             .iter()
             .map(|(k, v)| (k.as_ref(), v))

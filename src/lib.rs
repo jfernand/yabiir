@@ -40,6 +40,9 @@ mod tests {
         // 1_700_000_000 is 2023-11-14; comfortably in the past of any real
         // test run without hardcoding "now".
         let t = now_unix();
-        assert!(t > 1_700_000_000, "now_unix() returned implausibly small {t}");
+        assert!(
+            t > 1_700_000_000,
+            "now_unix() returned implausibly small {t}"
+        );
     }
 }

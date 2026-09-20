@@ -61,10 +61,7 @@ mod tests {
     #[test]
     fn display_produces_a_nonempty_message_naming_the_variant() {
         let cases: [(Error, &str); 6] = [
-            (
-                Error::Io(std::io::Error::other("boom")),
-                "boom",
-            ),
+            (Error::Io(std::io::Error::other("boom")), "boom"),
             (Error::AlreadyLocked, "locked"),
             (Error::EmptyKey, "empty"),
             (Error::Corrupt("bad crc".to_string()), "bad crc"),
@@ -85,8 +82,20 @@ mod tests {
     fn source_chains_to_the_inner_io_error_only_for_the_io_variant() {
         use std::error::Error as _;
         let io_err = Error::Io(std::io::Error::other("boom"));
-        assert!(io_err.source().is_some());
-        assert!(Error::EmptyKey.source().is_none());
-        assert!(Error::ReadOnly.source().is_none());
+        assert!(
+            io_err
+                .source()
+                .is_some()
+        );
+        assert!(
+            Error::EmptyKey
+                .source()
+                .is_none()
+        );
+        assert!(
+            Error::ReadOnly
+                .source()
+                .is_none()
+        );
     }
 }

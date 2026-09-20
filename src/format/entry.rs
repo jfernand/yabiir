@@ -16,8 +16,7 @@ pub struct Entry {
 
 impl Entry {
     pub(crate) fn is_tombstone(&self) -> bool {
-        self
-            .header
+        self.header
             .tombstone
     }
 }
@@ -311,6 +310,11 @@ mod tests {
         assert_eq!(encoded.len(), expected_len);
         assert!(!encoded.is_empty());
         assert_eq!(encoded.as_ref(), encoded.as_bytes());
-        assert_eq!(encoded.as_ref().len(), expected_len);
+        assert_eq!(
+            encoded
+                .as_ref()
+                .len(),
+            expected_len
+        );
     }
 }

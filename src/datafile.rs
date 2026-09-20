@@ -452,7 +452,9 @@ mod tests {
         let mut active = ActiveFile::create(&dir, 1).unwrap();
         assert!(active.is_empty());
         let encoded = format::encode_entry(b"k", b"v", false, 0);
-        active.append(&encoded).unwrap();
+        active
+            .append(&encoded)
+            .unwrap();
         assert!(!active.is_empty());
     }
 
@@ -461,11 +463,18 @@ mod tests {
         let dir = TempDir::new();
         let mut active = ActiveFile::create(&dir, 1).unwrap();
         let encoded = format::encode_entry(b"k", b"hello", false, 0);
-        let (_, value_pos, _) = active.append(&encoded).unwrap();
+        let (_, value_pos, _) = active
+            .append(&encoded)
+            .unwrap();
         // Read directly through ActiveFile's own handle, not DataFileSet —
         // this is the still-active file, and DataFileSet only ever opens
         // rotated-out (immutable) files.
-        assert_eq!(active.read_at(value_pos, 5).unwrap(), b"hello");
+        assert_eq!(
+            active
+                .read_at(value_pos, 5)
+                .unwrap(),
+            b"hello"
+        );
     }
 
     #[test]
@@ -477,15 +486,21 @@ mod tests {
             .append_buffered(&encoded)
             .unwrap(); // deliberately not flushed
         let path = DataFileSet::data_path(&dir, 1);
-        let before = fs::metadata(&path).unwrap().len();
+        let before = fs::metadata(&path)
+            .unwrap()
+            .len();
         assert!(
             before < active.len(),
             "bytes should still be buffered, not yet on disk"
         );
 
-        active.flush_only().unwrap();
+        active
+            .flush_only()
+            .unwrap();
 
-        let after = fs::metadata(&path).unwrap().len();
+        let after = fs::metadata(&path)
+            .unwrap()
+            .len();
         assert_eq!(
             after,
             active.len(),
@@ -498,24 +513,42 @@ mod tests {
         let dir = TempDir::new();
         let mut active = ActiveFile::create(&dir, 1).unwrap();
         let encoded = format::encode_entry(b"k", b"v", false, 0);
-        let (file_id, value_pos, _) = active.append(&encoded).unwrap();
-        active.sync().unwrap();
+        let (file_id, value_pos, _) = active
+            .append(&encoded)
+            .unwrap();
+        active
+            .sync()
+            .unwrap();
         drop(active);
 
         let files = DataFileSet::new(&*dir);
         // Populate the handle cache.
-        assert_eq!(files.read_at(file_id, value_pos, 1).unwrap(), b"v");
+        assert_eq!(
+            files
+                .read_at(file_id, value_pos, 1)
+                .unwrap(),
+            b"v"
+        );
 
         fs::remove_file(DataFileSet::data_path(&dir, file_id)).unwrap();
         // Unix semantics: the cached fd stays valid even after the
         // directory entry is unlinked, so without forgetting it, reads
         // still (silently) succeed against the deleted file's old content.
-        assert_eq!(files.read_at(file_id, value_pos, 1).unwrap(), b"v");
+        assert_eq!(
+            files
+                .read_at(file_id, value_pos, 1)
+                .unwrap(),
+            b"v"
+        );
 
         files.forget(file_id);
         // Forgetting evicts the cached fd, so the next read has to do a
         // fresh File::open — which now fails, since the file is gone.
-        assert!(files.read_at(file_id, value_pos, 1).is_err());
+        assert!(
+            files
+                .read_at(file_id, value_pos, 1)
+                .is_err()
+        );
     }
 
     #[test]

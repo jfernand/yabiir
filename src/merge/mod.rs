@@ -166,13 +166,7 @@ pub(crate) fn merge_with_repoint_hook(
 
     remove_old_input_files(dir, files, &input_ids);
 
-    restore_active_file(
-        dir,
-        active,
-        group_commit,
-        next_file_id,
-        highest_output_id,
-    )?;
+    restore_active_file(dir, active, group_commit, next_file_id, highest_output_id)?;
 
     Ok(())
 }
@@ -517,7 +511,8 @@ mod tests {
             .unwrap();
         }
 
-        db.merge().unwrap();
+        db.merge()
+            .unwrap();
 
         let merge_output_ids: Vec<u32> = DataFileSet::discover(&dir)
             .unwrap()
@@ -532,7 +527,8 @@ mod tests {
 
         for i in 0..10u32 {
             assert_eq!(
-                db.get(format!("k{i}").as_bytes()).unwrap(),
+                db.get(format!("k{i}").as_bytes())
+                    .unwrap(),
                 Some(format!("v{i}").into_bytes())
             );
         }
@@ -589,11 +585,13 @@ mod tests {
         // output writer now has no reason to rotate for 20 small entries,
         // so they all land in one batch that only `finish()` flushes.
         let db = Engine::open(&*dir, Options::default()).unwrap();
-        db.merge().unwrap();
+        db.merge()
+            .unwrap();
 
         for i in 0..20u32 {
             assert_eq!(
-                db.get(format!("k{i}").as_bytes()).unwrap(),
+                db.get(format!("k{i}").as_bytes())
+                    .unwrap(),
                 Some(format!("v{i}").into_bytes()),
                 "key k{i} missing or wrong after merge — finish()'s final-batch \
                  flush likely didn't happen"
@@ -621,7 +619,9 @@ mod tests {
         let reopened = Engine::open(&*dir, Options::default()).unwrap();
         for i in 0..20u32 {
             assert_eq!(
-                reopened.get(format!("k{i}").as_bytes()).unwrap(),
+                reopened
+                    .get(format!("k{i}").as_bytes())
+                    .unwrap(),
                 Some(format!("v{i}").into_bytes())
             );
         }
@@ -671,14 +671,19 @@ mod tests {
                 .unwrap(),
             Some(b"a-v1".to_vec())
         );
-        assert_eq!(db.get(b"b").unwrap(), None);
+        assert_eq!(
+            db.get(b"b")
+                .unwrap(),
+            None
+        );
         assert_eq!(
             db.get(b"c")
                 .unwrap(),
             Some(b"c-v1".to_vec())
         );
 
-        db.merge().unwrap();
+        db.merge()
+            .unwrap();
 
         assert_eq!(
             db.get(b"a")
@@ -686,7 +691,11 @@ mod tests {
             Some(b"a-v1".to_vec()),
             "a (before the corrupt entry) must survive merge"
         );
-        assert_eq!(db.get(b"b").unwrap(), None);
+        assert_eq!(
+            db.get(b"b")
+                .unwrap(),
+            None
+        );
         assert_eq!(
             db.get(b"c")
                 .unwrap(),

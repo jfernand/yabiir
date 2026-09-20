@@ -30,7 +30,7 @@ impl DirLock {
     pub fn acquire(dir: &Path) -> Result<Self> {
         let path = dir.join(".bitcask.lock");
         let file = OpenOptions::new()
-            .create(true)// TODO append behaviour?
+            .create(true) // TODO append behaviour?
             .write(true)
             .open(&path)?;
         file.try_lock_exclusive()

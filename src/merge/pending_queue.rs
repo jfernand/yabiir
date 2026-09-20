@@ -10,7 +10,7 @@ impl PendingQueue {
         self.0
             .push(entry);
     }
-/// Queues a repointing from an existing entry in file_id to new_file_id, at its new position
+    /// Queues a repointing from an existing entry in file_id to new_file_id, at its new position
     pub(crate) fn queue(
         &mut self,
         entry: Entry,

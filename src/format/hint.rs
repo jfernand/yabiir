@@ -210,6 +210,11 @@ mod tests {
         assert_eq!(encoded.len(), expected_len);
         assert!(!encoded.is_empty());
         assert_eq!(encoded.as_ref(), encoded.as_bytes());
-        assert_eq!(encoded.as_ref().len(), expected_len);
+        assert_eq!(
+            encoded
+                .as_ref()
+                .len(),
+            expected_len
+        );
     }
 }

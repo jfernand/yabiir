@@ -1,6 +1,6 @@
 [package]
 name = "yabiir"
-version = "0.2.1-dev"
+version = "0.3.0"
 edition = "2024"
 description = "Bitcask implementation in rust"
 license = "MIT OR Apache-2.0"

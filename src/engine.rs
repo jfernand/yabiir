@@ -143,7 +143,7 @@ impl Engine {
             .read_at(entry.file_id, entry.value_pos, entry.value_size)?)
     }
 
-    /// Test-only entry point into [`merge::merge_with_hook`], exposed here
+    /// Test-only entry point into [`merge::merge_with_repoint_hook`], exposed here
     /// because it needs direct access to this struct's private fields —
     /// `merge.rs` can't reach them from outside this module. Lets tests
     /// deterministically pause merge right before it repoints a specific
@@ -166,7 +166,7 @@ impl Engine {
             .active
             .as_ref()
             .ok_or(Error::ReadOnly)?;
-        merge::merge_with_hook(
+        merge::merge_with_repoint_hook(
             &self.dir,
             &self.keydir,
             &self.files,
@@ -348,6 +348,7 @@ mod tests {
     use crate::now_unix;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::mpsc::{Receiver, Sender};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Minimal self-cleaning temp directory — same pattern as
@@ -696,31 +697,24 @@ mod tests {
         let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
 
         let merger_db = std::sync::Arc::clone(&db);
-        let merger = std::thread::spawn(move || {
+        let merge_thread_handle = std::thread::spawn(move || {
             merger_db
                 .merge_with_hook(move |key| {
+                    // this runs when K is about to be repointed, after it has been copied forward
                     if key == b"K" {
-                        paused_tx
-                            .send(())
-                            .unwrap();
-                        resume_rx
-                            .recv()
-                            .unwrap();
+                        pause_thread(&paused_tx);
+                        resume_thread(&resume_rx);
                     }
                 })
                 .unwrap();
         });
 
-        paused_rx
-            .recv()
-            .unwrap(); // merge has copied K forward, about to repoint
+        wait_for_merge(paused_rx); // merge has copied K forward, about to repoint
         db.put(b"K", b"new", now_unix())
             .unwrap(); // race: overwrite K while merge is paused
-        resume_tx
-            .send(())
-            .unwrap(); // let merge's (now-stale) CAS attempt run
+        resume_merge(resume_tx); // let merge's (now-stale) CAS attempt run
 
-        merger
+        merge_thread_handle
             .join()
             .unwrap();
 
@@ -729,6 +723,30 @@ mod tests {
                 .unwrap(),
             Some(b"new".to_vec())
         );
+    }
+
+    fn resume_merge(resume_tx: Sender<()>) {
+        resume_tx
+            .send(())
+            .unwrap();
+    }
+
+    fn wait_for_merge(paused_rx: Receiver<()>) {
+        paused_rx
+            .recv()
+            .unwrap();
+    }
+
+    fn pause_thread(paused_tx: &Sender<()>) {
+        paused_tx
+            .send(())
+            .unwrap();
+    }
+
+    fn resume_thread(resume_rx: &Receiver<()>) {
+        resume_rx
+            .recv()
+            .unwrap(); // continue merge
     }
 
     #[test]

@@ -18,6 +18,17 @@ pub struct KeydirEntry {
     pub timestamp: u32,
 }
 
+impl KeydirEntry {
+    pub(crate) fn new(file_id: u32, value_size: u32, value_pos: u64, timestamp: u32) -> Self {
+        Self {
+            file_id,
+            value_size,
+            value_pos,
+            timestamp,
+        }
+    }
+}
+
 /// The keydir itself. Not thread-safe on its own — see [`SharedKeydir`] for
 /// the concurrent wrapper used at the engine level.
 ///
@@ -82,7 +93,7 @@ impl Keydir {
             .is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &KeydirEntry)> {
+    pub fn iter(&self) -> impl Iterator<Item=(&[u8], &KeydirEntry)> {
         self.map
             .iter()
             .map(|(k, v)| (k.as_ref(), v))

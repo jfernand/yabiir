@@ -14,6 +14,14 @@ pub struct Entry {
     pub value: Vec<u8>, // empty for tombstones
 }
 
+impl Entry {
+    pub(crate) fn is_tombstone(&self) -> bool {
+        self
+            .header
+            .tombstone
+    }
+}
+
 /// A fully-encoded data-file entry (CRC + header + key + value), ready to
 /// be appended verbatim to a `.bitcask.data` file.
 ///

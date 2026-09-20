@@ -74,7 +74,7 @@ use output_writer::MergeOutputWriter;
 use pending_queue::PendingQueue;
 use std::fs::{self, File};
 use std::io::{self};
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -152,31 +152,19 @@ pub(crate) fn merge_with_repoint_hook(
     // never repointing a key before its bytes are flushed, same guarantee
     // as before, just satisfied once per batch instead of once per entry.
     let mut pending = PendingQueue::new();
-    for &file_id in &input_ids {
-        let data_path = DataFileSet::data_path(dir, file_id);
-        copy_forward_file_entries(
-            keydir,
-            &mut before_repoint,
-            &mut writer,
-            &mut highest_output_id,
-            &mut pending,
-            file_id,
-            &data_path,
-        )?;
-    }
+    copy_forward_all_live_entries(
+        dir,
+        keydir,
+        &input_ids,
+        &mut writer,
+        &mut highest_output_id,
+        &mut pending,
+        &mut before_repoint,
+    )?;
     writer.finish()?; // flushes + fsyncs whatever's left in the final batch
     apply_pending_repoints(keydir, &mut pending, &mut before_repoint);
 
-    // 4. Remove the old input files now that nothing in the keydir points
-    //    at them anymore: every key that was live in them now points at
-    //    `out`'s files (or was already repointed elsewhere by a race);
-    //    every key that wasn't live was already pointing elsewhere and
-    //    still does.
-    for &file_id in &input_ids {
-        let _ = fs::remove_file(DataFileSet::data_path(dir, file_id));
-        let _ = fs::remove_file(DataFileSet::hint_path(dir, file_id));
-        files.forget(file_id);
-    }
+    remove_old_input_files(dir, files, &input_ids);
 
     // 5. Restore "the active file is numerically newest" if merge's own
     //    output caught up to or passed it — see the module-level doc note
@@ -199,14 +187,51 @@ pub(crate) fn merge_with_repoint_hook(
     Ok(())
 }
 
+fn copy_forward_all_live_entries(
+    dir: &Path,
+    keydir: &SharedKeydir,
+    input_ids: &Vec<u32>,
+    writer: &mut MergeOutputWriter,
+    highest_output_id: &mut u32,
+    pending: &mut PendingQueue,
+    mut before_repoint: &mut impl FnMut(&[u8]),
+) -> io::Result<()> {
+    for &file_id in input_ids {
+        let data_path = DataFileSet::data_path(dir, file_id);
+        copy_forward_file_entries(
+            keydir,
+            writer,
+            highest_output_id,
+            pending,
+            file_id,
+            &data_path,
+            &mut before_repoint,
+        )?;
+    }
+    Ok(())
+}
+
+fn remove_old_input_files(dir: &Path, files: &DataFileSet, input_ids: &Vec<u32>) {
+    // 4. Remove the old input files now that nothing in the keydir points
+    //    at them anymore: every key that was live in them now points at
+    //    `out`'s files (or was already repointed elsewhere by a race);
+    //    every key that wasn't live was already pointing elsewhere and
+    //    still does.
+    for &file_id in input_ids {
+        let _ = fs::remove_file(DataFileSet::data_path(dir, file_id));
+        let _ = fs::remove_file(DataFileSet::hint_path(dir, file_id));
+        files.forget(file_id);
+    }
+}
+
 fn copy_forward_file_entries(
     keydir: &SharedKeydir,
-    mut before_repoint: &mut impl FnMut(&[u8]),
     writer: &mut MergeOutputWriter,
     highest_output_id: &mut u32,
     pending: &mut PendingQueue,
     file_id: u32,
-    data_path: &PathBuf,
+    data_path: &Path,
+    mut before_repoint: &mut impl FnMut(&[u8]),
 ) -> io::Result<()> {
     let mut max_output_id = *highest_output_id;
     for (offset, entry) in read_all_entries(data_path)? {

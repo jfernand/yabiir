@@ -74,7 +74,7 @@ use output_writer::MergeOutputWriter;
 use pending_queue::PendingQueue;
 use std::fs::{self, File};
 use std::io::{self};
-use std::path::{Path};
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -166,6 +166,24 @@ pub(crate) fn merge_with_repoint_hook(
 
     remove_old_input_files(dir, files, &input_ids);
 
+    restore_active_file(
+        dir,
+        active,
+        group_commit,
+        next_file_id,
+        highest_output_id,
+    )?;
+
+    Ok(())
+}
+
+fn restore_active_file(
+    dir: &Path,
+    active: &Mutex<ActiveFile>,
+    group_commit: &GroupCommit,
+    next_file_id: &AtomicU32,
+    highest_output_id: u32,
+) -> io::Result<()> {
     // 5. Restore "the active file is numerically newest" if merge's own
     //    output caught up to or passed it — see the module-level doc note
     //    above on why this matters for a future recovery's scan order. A
@@ -182,8 +200,7 @@ pub(crate) fn merge_with_repoint_hook(
             let new_id = next_file_id.fetch_add(1, Ordering::SeqCst);
             *active_guard = ActiveFile::create(dir, new_id)?;
         }
-    }
-
+    };
     Ok(())
 }
 
@@ -198,7 +215,7 @@ fn copy_forward_all_live_entries(
 ) -> io::Result<()> {
     for &file_id in input_ids {
         let data_path = DataFileSet::data_path(dir, file_id);
-        copy_forward_file_entries(
+        copy_forward_live_file_entries(
             keydir,
             writer,
             highest_output_id,
@@ -224,7 +241,7 @@ fn remove_old_input_files(dir: &Path, files: &DataFileSet, input_ids: &Vec<u32>)
     }
 }
 
-fn copy_forward_file_entries(
+fn copy_forward_live_file_entries(
     keydir: &SharedKeydir,
     writer: &mut MergeOutputWriter,
     highest_output_id: &mut u32,
@@ -236,7 +253,7 @@ fn copy_forward_file_entries(
     let mut max_output_id = *highest_output_id;
     for (offset, entry) in read_all_entries(data_path)? {
         if entry.is_tombstone() {
-            continue; // dead by definition — never "live"
+            continue; // dead
         }
         let value_pos = offset
             + format::HEADER_SIZE as u64

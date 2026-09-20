@@ -25,6 +25,15 @@ pub struct Options {
     pub metrics: Option<Arc<dyn Metrics>>,
 }
 
+impl Options {
+    pub fn read_only(self) -> Self {
+        Self {
+            is_read_write: false,
+            ..self
+        }
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         Self {

@@ -691,7 +691,7 @@ mod tests {
         merge_summaries: Mutex<Vec<(usize, usize)>>, // (input_files, live_entries_copied)
     }
 
-    impl crate::Metrics for GaugeRecordingMetrics {
+    impl Metrics for GaugeRecordingMetrics {
         fn record_pending_queue_depth(&self, depth: usize) {
             self.pending_queue_depths
                 .lock()

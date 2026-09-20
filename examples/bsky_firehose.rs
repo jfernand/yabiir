@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use atrium_api::app::bsky::feed::post::RecordData as PostRecordData;
+use atrium_api::app::bsky::feed::post::RecordData;
 use atrium_api::com::atproto::sync::subscribe_repos::CommitData;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use futures_util::io::Cursor as AsyncCursor;
@@ -476,7 +476,7 @@ impl App {
                             .record(1); // referenced block not in this commit's diff
                         continue;
                     };
-                    let Ok(record) = serde_ipld_dagcbor::from_slice::<PostRecordData>(block_bytes)
+                    let Ok(record) = serde_ipld_dagcbor::from_slice::<RecordData>(block_bytes)
                     else {
                         self.skipped
                             .record(1); // not decodable as a post record

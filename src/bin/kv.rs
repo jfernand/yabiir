@@ -66,6 +66,7 @@ fn run(args: Args) -> yabiir::Result<ExitCode> {
             ExitCode::SUCCESS
         }
         Command::List => {
+            let db = Engine::open(&args.dir, Options::default().read_only())?;
             for key in db.list_keys()? {
                 println!("{}", String::from_utf8_lossy(&key));
             }

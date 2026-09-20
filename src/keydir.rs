@@ -30,11 +30,17 @@ pub struct KeydirEntry {
 /// directly (10,000 sequential keys landed in 1 of 16,384 buckets),
 /// silently turning every keydir operation into an O(n) scan for a very
 /// plausible real workload (auto-incrementing IDs, timestamps, zero-padded
-/// counters). aHash's default `RandomState` also seeds itself randomly per
-/// process (unlike raw, unseeded `FxHash`), so it keeps reasonable
-/// hash-flooding resistance too — this isn't purely a durability-neutral,
-/// zero-downside change like the read-path fix alongside it, so if keys
-/// ever come from a genuinely adversarial/untrusted source, re-evaluate.
+/// counters). aHash's default `RandomState` (what `HashMap::default()`
+/// uses) also randomizes its keys on every construction — not just once
+/// per process, but a fresh seed for every `RandomState`/`HashMap`
+/// instance, sourced from OS randomness (`getrandom`) mixed with a
+/// per-instance counter (see `ahash::RandomState::new`'s own docs) — unlike
+/// raw, unseeded `FxHash`, so it keeps reasonable hash-flooding resistance
+/// too. That's not purely a durability-neutral, zero-downside change like
+/// the read-path fix alongside it, so if keys ever come from a genuinely
+/// adversarial/untrusted source, re-evaluate. The same per-instance
+/// randomization is also why this hasher can't be used as-is for
+/// deterministic simulation testing — see `docs/ROADMAP.md` §1.
 #[derive(Default)]
 pub struct Keydir {
     map: HashMap<Box<[u8]>, KeydirEntry, AHashState>,

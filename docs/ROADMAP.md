@@ -12,11 +12,14 @@ one process, on one machine, with no injected faults beyond what a proptest sequ
 next step up is deterministic simulation testing: running the engine under a harness like `madsim` or `turmoil` (or
 similar deterministic-simulation frameworks) that can inject disk latency, reordering, and partial writes, then
 replay any failure byte-for-byte to debug it. Getting there needs two things the codebase doesn't have yet. First,
-the keydir's hasher would need to become deterministic for simulation runs — `ahash`'s per-process random seeding is
-exactly right for resisting adversarial keys in production, but it means two "identical" simulated runs wouldn't see
-the same internal hash-bucket layout, which defeats reproducibility; a `BTreeMap` (deterministic iteration order by
-construction) or a fixed-seed hasher, swapped in only for the simulation build, would fix that without touching the
-production default. Second, the file system access in `datafile.rs`, `lock.rs`, and `recovery.rs` talks directly to
+the keydir's hasher would need to become deterministic for simulation runs. `ahash`'s default `RandomState` doesn't
+just pick one seed per process — every `HashMap::default()` construction gets its own fresh, OS-randomized seed (see
+`ahash::RandomState::new`'s own docs), which is exactly right for resisting adversarial keys in production but means
+even two `Keydir`s in the *same* run, let alone two "identical" simulated runs, wouldn't see the same internal
+hash-bucket layout — that defeats reproducible replay entirely. A `BTreeMap` (deterministic iteration order by
+construction) or `ahash::RandomState::with_seeds` (a genuinely fixed seed), swapped in only for the simulation build,
+would fix that without touching the production default. Second, the file system access in `datafile.rs`, `lock.rs`,
+and `recovery.rs` talks directly to
 `std::fs` and `std::os::unix::fs::FileExt` — a real simulation needs that behind a trait it can substitute a
 fault-injecting implementation for, which is a genuine architectural change, not a config flag.
 

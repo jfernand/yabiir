@@ -124,7 +124,7 @@ These are called out explicitly in the relevant module docs, not hidden:
 ## Testing
 
 ```sh
-cargo test                          # 59 unit tests + tests/model.rs's proptest model test
+cargo test                          # 76 unit tests + tests/model.rs's proptest model test
 PROPTEST_CASES=2000 cargo test --test model  # more property-based cases, for extra confidence
 cargo bench                         # Criterion suites — format, keydir, datafile, merge
 ```
@@ -132,6 +132,32 @@ cargo bench                         # Criterion suites — format, keydir, dataf
 The proptest model test runs random sequences of `put`/`delete`/`get`/`reopen`/`merge` against a plain `HashMap`
 reference model over a small, deliberately-colliding key alphabet — it's what caught a real recovery-ordering bug
 (documented in `src/merge.rs`) during development.
+
+CI (`.github/workflows/ci.yml`) runs `rustfmt --check`, `clippy -D warnings`, and the full test suite (including
+doctests and an extra-cases proptest run) on every push and pull request, on Linux and macOS.
+
+## Releasing
+
+Publishing to crates.io (`.github/workflows/publish.yml`) is triggered by pushing a tag matching `v*.*.*`, whose
+version must exactly match `Cargo.toml`'s. After bumping the version and committing that:
+
+```sh
+cargo xtask release
+```
+
+This is a small [xtask](https://github.com/matklad/cargo-xtask)-style dev-tooling crate (`xtask/`, a workspace
+member, `publish = false` — it never ships with the published `yabiir` crate) that runs the two steps that used to
+be manual:
+
+1. `git tag v<version>` (the version read straight from `Cargo.toml`, so it can't drift from what's about to be
+   published)
+2. `git push origin <that tag>`, which triggers the publish workflow
+
+It refuses to run with a dirty working tree or a tag that already exists, rather than tagging the wrong commit or
+silently no-op-ing. `cargo xtask <anything else>` prints the available tasks.
+
+Needs a `CARGO_REGISTRY_TOKEN` repo secret (Settings > Secrets and variables > Actions) — a crates.io API token
+scoped to publish this crate, generated from crates.io's Account Settings > API Tokens.
 
 ## Design notes
 

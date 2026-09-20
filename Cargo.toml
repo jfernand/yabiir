@@ -17,6 +17,12 @@ exclude = [
     "docs/papers/dynamo-amazon-sosp2007.pdf",
 ]
 
+# `yabiir` stays the workspace root package (unchanged layout — nothing
+# moved into a subdirectory); `xtask` is the only other member, a small
+# unpublished dev-tooling crate (`cargo xtask release`, see README.md).
+[workspace]
+members = ["xtask"]
+
 [dependencies]
 crc32fast = "1.5.1"
 clap = { version = "4.6.6", features = ["derive"] }

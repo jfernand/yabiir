@@ -970,4 +970,67 @@ mod tests {
         .unwrap();
         assert!(matches!(ro.merge(), Err(Error::ReadOnly)));
     }
+
+    /// `open`'s `next_file_id` must start strictly *above* the highest id
+    /// already on disk (`id + 1`), not reuse it (a stray `id * 1` bug would
+    /// make a reopened handle silently append to an existing, already
+    /// rotated-out file's id instead of starting a fresh one). Rotates
+    /// during the first session so more than one file exists, reopens, and
+    /// writes more — both the pre-reopen and post-reopen keys must survive,
+    /// and the post-reopen write must land in a genuinely new file id.
+    #[test]
+    fn reopen_after_rotation_starts_a_new_active_file_and_does_not_collide() {
+        let dir = TempDir::new();
+        {
+            let db = Engine::open(
+                &*dir,
+                Options {
+                    max_file_size: 1, // every put rotates into its own file
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            for i in 0..5u32 {
+                db.put(
+                    format!("k{i}").as_bytes(),
+                    format!("v{i}").as_bytes(),
+                    now_unix(),
+                )
+                .unwrap();
+            }
+        }
+        let before_ids = DataFileSet::discover(&dir).unwrap();
+        assert!(
+            before_ids.len() > 1,
+            "test needs multiple rotated files, got {before_ids:?}"
+        );
+        let highest_before = *before_ids.iter().max().unwrap();
+
+        let db = open(&dir);
+        db.put(b"new-key", b"new-value", now_unix())
+            .unwrap();
+
+        // The new write's file must be strictly newer than anything from
+        // the first session — not a collision with (and silent corruption
+        // of) an existing rotated-out file.
+        let after_ids = DataFileSet::discover(&dir).unwrap();
+        let highest_after = *after_ids.iter().max().unwrap();
+        assert!(
+            highest_after > highest_before,
+            "expected a new file id above {highest_before}, got {highest_after}"
+        );
+
+        // Every old key must still be intact — a colliding reopen would
+        // silently corrupt whichever old file it reused.
+        for i in 0..5u32 {
+            assert_eq!(
+                db.get(format!("k{i}").as_bytes()).unwrap(),
+                Some(format!("v{i}").into_bytes())
+            );
+        }
+        assert_eq!(
+            db.get(b"new-key").unwrap(),
+            Some(b"new-value".to_vec())
+        );
+    }
 }

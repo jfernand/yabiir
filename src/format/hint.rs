@@ -174,4 +174,42 @@ mod tests {
                 .is_none()
         );
     }
+
+    /// Matches `entry.rs`'s `truncation_is_detected_at_every_boundary` —
+    /// hint records need the same guarantee, and previously had no direct
+    /// test for it.
+    #[test]
+    fn truncation_is_detected_at_every_boundary() {
+        let header = EntryHeader {
+            timestamp: 42,
+            key_size: 3,
+            value_size: 10,
+            tombstone: false,
+        };
+        let encoded = encode_hint(b"key", &header, 12345).into_bytes();
+        for cut in 1..encoded.len() {
+            let mut cursor = Cursor::new(encoded[..cut].to_vec());
+            let read = read_hint(&mut cursor).unwrap();
+            match read {
+                Some(HintRead::Truncated) => {}
+                other => panic!("cut at {cut}: expected Truncated, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_hint_len_is_empty_and_as_ref_match_the_real_bytes() {
+        let header = EntryHeader {
+            timestamp: 0,
+            key_size: 3,
+            value_size: 0,
+            tombstone: false,
+        };
+        let encoded = encode_hint(b"key", &header, 0);
+        let expected_len = HINT_HEADER_SIZE + 3;
+        assert_eq!(encoded.len(), expected_len);
+        assert!(!encoded.is_empty());
+        assert_eq!(encoded.as_ref(), encoded.as_bytes());
+        assert_eq!(encoded.as_ref().len(), expected_len);
+    }
 }

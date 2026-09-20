@@ -283,4 +283,34 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn is_tombstone_reflects_the_header_flag() {
+        let live = encode_entry(b"k", b"v", false, 0);
+        let dead = encode_entry(b"k", &[], true, 0);
+        let EntryRead::Ok(live_entry, _) = read_entry(&mut Cursor::new(live.into_bytes()))
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected Ok");
+        };
+        let EntryRead::Ok(dead_entry, _) = read_entry(&mut Cursor::new(dead.into_bytes()))
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected Ok");
+        };
+        assert!(!live_entry.is_tombstone());
+        assert!(dead_entry.is_tombstone());
+    }
+
+    #[test]
+    fn encoded_entry_len_is_empty_and_as_ref_match_the_real_bytes() {
+        let encoded = encode_entry(b"key", b"value", false, 0);
+        let expected_len = HEADER_SIZE + 3 + 5;
+        assert_eq!(encoded.len(), expected_len);
+        assert!(!encoded.is_empty());
+        assert_eq!(encoded.as_ref(), encoded.as_bytes());
+        assert_eq!(encoded.as_ref().len(), expected_len);
+    }
 }

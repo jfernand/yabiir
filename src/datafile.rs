@@ -445,4 +445,93 @@ mod tests {
                 .unwrap();
         }
     }
+
+    #[test]
+    fn is_empty_reflects_whether_anything_has_been_written() {
+        let dir = TempDir::new();
+        let mut active = ActiveFile::create(&dir, 1).unwrap();
+        assert!(active.is_empty());
+        let encoded = format::encode_entry(b"k", b"v", false, 0);
+        active.append(&encoded).unwrap();
+        assert!(!active.is_empty());
+    }
+
+    #[test]
+    fn active_file_read_at_returns_the_bytes_just_written() {
+        let dir = TempDir::new();
+        let mut active = ActiveFile::create(&dir, 1).unwrap();
+        let encoded = format::encode_entry(b"k", b"hello", false, 0);
+        let (_, value_pos, _) = active.append(&encoded).unwrap();
+        // Read directly through ActiveFile's own handle, not DataFileSet —
+        // this is the still-active file, and DataFileSet only ever opens
+        // rotated-out (immutable) files.
+        assert_eq!(active.read_at(value_pos, 5).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn flush_only_makes_buffered_bytes_visible_on_disk() {
+        let dir = TempDir::new();
+        let mut active = ActiveFile::create(&dir, 1).unwrap();
+        let encoded = format::encode_entry(b"k", b"v", false, 0);
+        active
+            .append_buffered(&encoded)
+            .unwrap(); // deliberately not flushed
+        let path = DataFileSet::data_path(&dir, 1);
+        let before = fs::metadata(&path).unwrap().len();
+        assert!(
+            before < active.len(),
+            "bytes should still be buffered, not yet on disk"
+        );
+
+        active.flush_only().unwrap();
+
+        let after = fs::metadata(&path).unwrap().len();
+        assert_eq!(
+            after,
+            active.len(),
+            "flush_only should make buffered bytes visible on disk"
+        );
+    }
+
+    #[test]
+    fn forget_evicts_the_cached_read_handle() {
+        let dir = TempDir::new();
+        let mut active = ActiveFile::create(&dir, 1).unwrap();
+        let encoded = format::encode_entry(b"k", b"v", false, 0);
+        let (file_id, value_pos, _) = active.append(&encoded).unwrap();
+        active.sync().unwrap();
+        drop(active);
+
+        let files = DataFileSet::new(&*dir);
+        // Populate the handle cache.
+        assert_eq!(files.read_at(file_id, value_pos, 1).unwrap(), b"v");
+
+        fs::remove_file(DataFileSet::data_path(&dir, file_id)).unwrap();
+        // Unix semantics: the cached fd stays valid even after the
+        // directory entry is unlinked, so without forgetting it, reads
+        // still (silently) succeed against the deleted file's old content.
+        assert_eq!(files.read_at(file_id, value_pos, 1).unwrap(), b"v");
+
+        files.forget(file_id);
+        // Forgetting evicts the cached fd, so the next read has to do a
+        // fresh File::open — which now fails, since the file is gone.
+        assert!(files.read_at(file_id, value_pos, 1).is_err());
+    }
+
+    #[test]
+    fn parse_data_file_id_requires_both_correct_length_and_all_digits() {
+        assert_eq!(
+            parse_data_file_id(&format!("{:020}.bitcask.data", 42)),
+            Some(42)
+        );
+        // Right suffix, all-digit stem, but wrong length — must still be
+        // rejected (a real Bitcask file is always exactly 20 digits).
+        assert_eq!(parse_data_file_id("42.bitcask.data"), None);
+        // Exactly 20 characters, but not all digits.
+        assert_eq!(
+            parse_data_file_id(&format!("{:019}x.bitcask.data", 42)),
+            None
+        );
+        assert_eq!(parse_data_file_id("not-a-data-file.txt"), None);
+    }
 }

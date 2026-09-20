@@ -488,6 +488,213 @@ mod tests {
         }
     }
 
+    /// `MergeOutputWriter`'s own rotation (`is_ready_to_rotate`) is
+    /// separate from batched flushing, and every other test in this module
+    /// uses `max_file_size: 1`, which makes rotation happen anyway as a
+    /// side effect — but none of them actually assert that merge's *output*
+    /// itself split across multiple files, only that the final values are
+    /// correct. This checks that invariant directly: with a tiny
+    /// `max_file_size`, merge's own output must rotate into more than one
+    /// data file (each with its own hint file, unlike the trailing active
+    /// file), not just happen to still produce correct results.
+    #[test]
+    fn merge_output_rotates_when_it_exceeds_max_file_size() {
+        let dir = TempDir::new();
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 1,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        for i in 0..10u32 {
+            db.put(
+                format!("k{i}").as_bytes(),
+                format!("v{i}").as_bytes(),
+                now_unix(),
+            )
+            .unwrap();
+        }
+
+        db.merge().unwrap();
+
+        let merge_output_ids: Vec<u32> = DataFileSet::discover(&dir)
+            .unwrap()
+            .into_iter()
+            .filter(|&id| DataFileSet::hint_path(&dir, id).exists())
+            .collect();
+        assert!(
+            merge_output_ids.len() > 1,
+            "expected merge's own output to rotate into multiple files under \
+             a tiny max_file_size, got {merge_output_ids:?}"
+        );
+
+        for i in 0..10u32 {
+            assert_eq!(
+                db.get(format!("k{i}").as_bytes()).unwrap(),
+                Some(format!("v{i}").into_bytes())
+            );
+        }
+    }
+
+    /// Every other merge test in this module uses a tiny `max_file_size`,
+    /// which forces `MergeOutputWriter` to rotate (and thus fsync) on
+    /// nearly every entry — the exact confound documented in
+    /// `docs/merge-batched-flushing.typ`'s note on `benches/merge.rs`. That
+    /// means `finish()`'s specific job — flushing (and fsyncing) whatever's
+    /// left in the *final* batch when it never hit a rotation boundary or
+    /// the 256-entry threshold — has never actually been exercised with
+    /// real pending work by this test suite. Reproduced here as a real
+    /// regression test: write many keys under a small `max_file_size` (so
+    /// they land in many separate, genuinely rotated-out input files), then
+    /// reopen under the default (large) `max_file_size` before merging, so
+    /// merge's output writer has no reason to rotate and `finish()`'s own
+    /// flush is what makes the final batch's bytes visible at all. This
+    /// also exercises `restore_active_file`'s force-rotation branch (see
+    /// its "does not appear to be tested" comment) — merge's single output
+    /// file legitimately catches up to the freshly-reopened active file's
+    /// id here.
+    #[test]
+    fn merge_flushes_a_partial_final_batch_that_never_rotated() {
+        let dir = TempDir::new();
+        {
+            let db = Engine::open(
+                &*dir,
+                Options {
+                    max_file_size: 1, // every put rotates into its own file
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            for i in 0..20u32 {
+                db.put(
+                    format!("k{i}").as_bytes(),
+                    format!("v{i}").as_bytes(),
+                    now_unix(),
+                )
+                .unwrap();
+            }
+            // dropped: ~20 separate rotated-out input files plus a tiny,
+            // never-written-to active one.
+        }
+
+        let before_ids = DataFileSet::discover(&dir).unwrap();
+        assert!(
+            before_ids.len() >= 20,
+            "expected many small rotated files, got {before_ids:?}"
+        );
+
+        // Reopen with the default, large max_file_size — merge's own
+        // output writer now has no reason to rotate for 20 small entries,
+        // so they all land in one batch that only `finish()` flushes.
+        let db = Engine::open(&*dir, Options::default()).unwrap();
+        db.merge().unwrap();
+
+        for i in 0..20u32 {
+            assert_eq!(
+                db.get(format!("k{i}").as_bytes()).unwrap(),
+                Some(format!("v{i}").into_bytes()),
+                "key k{i} missing or wrong after merge — finish()'s final-batch \
+                 flush likely didn't happen"
+            );
+        }
+
+        // Exactly one genuine merge-output file (identified by having a
+        // companion hint file, unlike the active file) confirms the output
+        // writer really did batch everything into a single un-rotated file.
+        let merge_output_ids: Vec<u32> = DataFileSet::discover(&dir)
+            .unwrap()
+            .into_iter()
+            .filter(|id| !before_ids.contains(id))
+            .filter(|&id| DataFileSet::hint_path(&dir, id).exists())
+            .collect();
+        assert_eq!(
+            merge_output_ids.len(),
+            1,
+            "expected exactly one un-rotated merge-output file, got {merge_output_ids:?}"
+        );
+
+        // Durability across a fresh reopen too, not just within the same
+        // process (would also catch finish() flushing but never syncing).
+        drop(db);
+        let reopened = Engine::open(&*dir, Options::default()).unwrap();
+        for i in 0..20u32 {
+            assert_eq!(
+                reopened.get(format!("k{i}").as_bytes()).unwrap(),
+                Some(format!("v{i}").into_bytes())
+            );
+        }
+    }
+
+    /// `read_all_entries`'s `pos` bookkeeping is purely derived (the actual
+    /// file reading is sequential via the shared `File` handle, not
+    /// seek-based) — but a *live* entry after a corrupt (CRC-mismatch) one
+    /// in the *same* input file depends on it being correct, since
+    /// `copy_forward_live_file_entries` uses it to compute that entry's
+    /// `value_pos` for the keydir liveness check. Get this wrong and a live
+    /// key positioned after a corrupt entry in the same file is wrongly
+    /// treated as dead, silently dropped by merge, and left pointing at an
+    /// input file that merge then deletes.
+    #[test]
+    fn merge_correctly_resumes_scanning_after_a_corrupt_entry_in_an_input_file() {
+        let dir = TempDir::new();
+        {
+            let db = Engine::open(&*dir, Options::default()).unwrap();
+            db.put(b"a", b"a-v1", now_unix())
+                .unwrap();
+            db.put(b"b", b"b-v1", now_unix())
+                .unwrap();
+            db.put(b"c", b"c-v1", now_unix())
+                .unwrap();
+            // all three land in one file (file 0), which becomes an
+            // ordinary rotated-out (merge-eligible) file once reopened.
+        }
+
+        // Corrupt "b"'s value bytes in file 0 — a CRC mismatch, but leaves
+        // "c" (which comes right after it in the same file) intact.
+        let path = DataFileSet::data_path(&dir, 0);
+        let mut bytes = fs::read(&path).unwrap();
+        let corrupt_at = bytes
+            .windows(4)
+            .position(|w| w == b"b-v1")
+            .unwrap();
+        bytes[corrupt_at] ^= 0xFF;
+        fs::write(&path, &bytes).unwrap();
+
+        // Reopening starts a fresh active file (id 1); file 0's recovery
+        // scan (a separate code path from merge's own) already correctly
+        // drops "b" and keeps "c" here.
+        let db = Engine::open(&*dir, Options::default()).unwrap();
+        assert_eq!(
+            db.get(b"a")
+                .unwrap(),
+            Some(b"a-v1".to_vec())
+        );
+        assert_eq!(db.get(b"b").unwrap(), None);
+        assert_eq!(
+            db.get(b"c")
+                .unwrap(),
+            Some(b"c-v1".to_vec())
+        );
+
+        db.merge().unwrap();
+
+        assert_eq!(
+            db.get(b"a")
+                .unwrap(),
+            Some(b"a-v1".to_vec()),
+            "a (before the corrupt entry) must survive merge"
+        );
+        assert_eq!(db.get(b"b").unwrap(), None);
+        assert_eq!(
+            db.get(b"c")
+                .unwrap(),
+            Some(b"c-v1".to_vec()),
+            "c (after the corrupt entry, same input file) must survive merge"
+        );
+    }
+
     #[test]
     fn tombstone_reclamation() {
         let dir = TempDir::new();

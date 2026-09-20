@@ -332,4 +332,19 @@ mod tests {
                 .unwrap();
         }
     }
+
+    #[test]
+    fn shared_keydir_len_and_is_empty_reflect_contents() {
+        let shared = SharedKeydir::new(Keydir::new());
+        assert_eq!(shared.len(), 0);
+        assert!(shared.is_empty());
+
+        shared.insert(b"k", entry(1));
+        assert_eq!(shared.len(), 1);
+        assert!(!shared.is_empty());
+
+        shared.remove(b"k");
+        assert_eq!(shared.len(), 0);
+        assert!(shared.is_empty());
+    }
 }

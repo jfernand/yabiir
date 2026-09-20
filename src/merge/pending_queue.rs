@@ -56,9 +56,3 @@ impl PendingQueue {
             .drain(range)
     }
 }
-
-impl AsRef<Vec<(Vec<u8>, KeydirEntry, KeydirEntry)>> for PendingQueue {
-    fn as_ref(&self) -> &Vec<(Vec<u8>, KeydirEntry, KeydirEntry)> {
-        &self.0
-    }
-}

@@ -53,3 +53,40 @@ impl From<std::io::Error> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_produces_a_nonempty_message_naming_the_variant() {
+        let cases: [(Error, &str); 6] = [
+            (
+                Error::Io(std::io::Error::other("boom")),
+                "boom",
+            ),
+            (Error::AlreadyLocked, "locked"),
+            (Error::EmptyKey, "empty"),
+            (Error::Corrupt("bad crc".to_string()), "bad crc"),
+            (Error::ReadOnly, "read-only"),
+            (Error::NotImplemented("merge"), "merge"),
+        ];
+        for (err, needle) in cases {
+            let msg = err.to_string();
+            assert!(!msg.is_empty(), "{err:?} produced an empty Display message");
+            assert!(
+                msg.contains(needle),
+                "{err:?}'s Display message {msg:?} should mention {needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_chains_to_the_inner_io_error_only_for_the_io_variant() {
+        use std::error::Error as _;
+        let io_err = Error::Io(std::io::Error::other("boom"));
+        assert!(io_err.source().is_some());
+        assert!(Error::EmptyKey.source().is_none());
+        assert!(Error::ReadOnly.source().is_none());
+    }
+}

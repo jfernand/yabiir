@@ -9,7 +9,6 @@
 //! Run with: `cargo bench --bench merge`
 
 use std::fs;
-use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -96,10 +95,8 @@ fn bench_merge_noop(c: &mut Criterion) {
                 (dir, db)
             },
             |(dir, db)| {
-                black_box(
-                    db.merge()
-                        .unwrap(),
-                );
+                db.merge()
+                    .unwrap(); // unit result — nothing for black_box to guard
                 (dir, db) // keep both alive until the batch is torn down
             },
             BatchSize::SmallInput,

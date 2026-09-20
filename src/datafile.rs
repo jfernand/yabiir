@@ -186,10 +186,9 @@ impl DataFileSet {
             if let Some(name) = entry
                 .file_name()
                 .to_str()
+                && let Some(id) = parse_data_file_id(name)
             {
-                if let Some(id) = parse_data_file_id(name) {
-                    ids.push(id);
-                }
+                ids.push(id);
             }
         }
         ids.sort_unstable();

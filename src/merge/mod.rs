@@ -70,6 +70,7 @@ use crate::datafile::{ActiveFile, DataFileSet};
 use crate::error::Result;
 use crate::format::{self, Entry, EntryRead};
 use crate::keydir::SharedKeydir;
+use crate::metrics::Metrics;
 use output_writer::MergeOutputWriter;
 use pending_queue::PendingQueue;
 use std::fs::{self, File};
@@ -92,6 +93,7 @@ mod pending_queue;
 /// sharing the *same* active-file lock and file-id counter the engine's
 /// write path uses, which is what makes merge-output file ids never
 /// collide with concurrently-rotated active files.
+#[allow(clippy::too_many_arguments)]
 pub fn merge(
     dir: &Path,
     keydir: &SharedKeydir,
@@ -100,6 +102,7 @@ pub fn merge(
     group_commit: &GroupCommit,
     next_file_id: &AtomicU32,
     max_file_size: u64,
+    metrics: &dyn Metrics,
 ) -> Result<()> {
     merge_with_repoint_hook(
         dir,
@@ -109,6 +112,7 @@ pub fn merge(
         group_commit,
         next_file_id,
         max_file_size,
+        metrics,
         |_| {},
     )
 }
@@ -133,6 +137,7 @@ pub(crate) fn merge_with_repoint_hook(
     group_commit: &GroupCommit,
     next_file_id: &AtomicU32,
     max_file_size: u64,
+    metrics: &dyn Metrics,
     mut before_repoint: impl FnMut(&[u8]),
 ) -> Result<()> {
     let input_ids = collect_input_ids(dir, active)?;
@@ -152,6 +157,7 @@ pub(crate) fn merge_with_repoint_hook(
     // never repointing a key before its bytes are flushed, same guarantee
     // as before, just satisfied once per batch instead of once per entry.
     let mut pending = PendingQueue::new();
+    let mut live_entries_copied = 0usize;
     copy_forward_all_live_entries(
         dir,
         keydir,
@@ -159,13 +165,17 @@ pub(crate) fn merge_with_repoint_hook(
         &mut writer,
         &mut highest_output_id,
         &mut pending,
+        &mut live_entries_copied,
+        metrics,
         &mut before_repoint,
     )?;
-    finish_and_apply_pending_repoints(keydir, writer, &mut pending, &mut before_repoint)?;
+    finish_and_apply_pending_repoints(keydir, writer, &mut pending, metrics, &mut before_repoint)?;
 
     remove_old_input_files(dir, files, &input_ids);
 
     restore_active_file(dir, active, group_commit, next_file_id, highest_output_id)?;
+
+    metrics.record_merge_summary(input_ids.len(), live_entries_copied);
 
     Ok(())
 }
@@ -182,9 +192,13 @@ fn finish_and_apply_pending_repoints(
     keydir: &SharedKeydir,
     writer: MergeOutputWriter,
     pending: &mut PendingQueue,
+    metrics: &dyn Metrics,
     before_repoint: &mut impl FnMut(&[u8]),
 ) -> io::Result<()> {
     writer.finish()?;
+    if !pending.is_empty() {
+        metrics.record_pending_queue_depth(pending.len());
+    }
     apply_pending_repoints(keydir, pending, before_repoint);
     Ok(())
 }
@@ -220,6 +234,7 @@ fn restore_active_file(
     feature = "tracing",
     tracing::instrument(skip_all, name = "merge::copy_forward")
 )]
+#[allow(clippy::too_many_arguments)]
 fn copy_forward_all_live_entries(
     dir: &Path,
     keydir: &SharedKeydir,
@@ -227,6 +242,8 @@ fn copy_forward_all_live_entries(
     writer: &mut MergeOutputWriter,
     highest_output_id: &mut u32,
     pending: &mut PendingQueue,
+    live_entries_copied: &mut usize,
+    metrics: &dyn Metrics,
     mut before_repoint: &mut impl FnMut(&[u8]),
 ) -> io::Result<()> {
     for &file_id in input_ids {
@@ -236,6 +253,8 @@ fn copy_forward_all_live_entries(
             writer,
             highest_output_id,
             pending,
+            live_entries_copied,
+            metrics,
             file_id,
             &data_path,
             &mut before_repoint,
@@ -261,11 +280,14 @@ fn remove_old_input_files(dir: &Path, files: &DataFileSet, input_ids: &Vec<u32>)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_forward_live_file_entries(
     keydir: &SharedKeydir,
     writer: &mut MergeOutputWriter,
     highest_output_id: &mut u32,
     pending: &mut PendingQueue,
+    live_entries_copied: &mut usize,
+    metrics: &dyn Metrics,
     file_id: u32,
     data_path: &Path,
     mut before_repoint: &mut impl FnMut(&[u8]),
@@ -289,6 +311,7 @@ fn copy_forward_live_file_entries(
 
         let (new_file_id, new_value_pos, flushed) = writer.write_live_entry(&entry)?;
         max_output_id = max_output_id.max(writer.current_file_id());
+        *live_entries_copied += 1;
 
         // 3. Repoint the keydir ONLY IF it still points at the exact
         //    (file_id, offset) we just copied — if a concurrent put()
@@ -299,6 +322,7 @@ fn copy_forward_live_file_entries(
         pending.queue(entry, file_id, new_file_id, value_pos, new_value_pos);
 
         if flushed {
+            metrics.record_pending_queue_depth(pending.len());
             apply_pending_repoints(keydir, pending, &mut before_repoint);
         }
     }
@@ -655,6 +679,129 @@ mod tests {
                 Some(format!("v{i}").into_bytes())
             );
         }
+    }
+
+    /// A `Metrics` test double recording every `record_pending_queue_depth`
+    /// and `record_merge_summary` call it sees — proves merge actually
+    /// calls into a supplied `Metrics` for these two gauges specifically,
+    /// not just the duration-based ones already covered in `engine.rs`.
+    #[derive(Default)]
+    struct GaugeRecordingMetrics {
+        pending_queue_depths: Mutex<Vec<usize>>,
+        merge_summaries: Mutex<Vec<(usize, usize)>>, // (input_files, live_entries_copied)
+    }
+
+    impl crate::Metrics for GaugeRecordingMetrics {
+        fn record_pending_queue_depth(&self, depth: usize) {
+            self.pending_queue_depths
+                .lock()
+                .unwrap()
+                .push(depth);
+        }
+        fn record_merge_summary(&self, input_files: usize, live_entries_copied: usize) {
+            self.merge_summaries
+                .lock()
+                .unwrap()
+                .push((input_files, live_entries_copied));
+        }
+    }
+
+    #[test]
+    fn merge_reports_merge_summary_metrics() {
+        let dir = TempDir::new();
+        let metrics = Arc::new(GaugeRecordingMetrics::default());
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 1, // every put rotates into its own file
+                metrics: Some(metrics.clone() as Arc<dyn crate::Metrics>),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        for i in 0..10u32 {
+            db.put(
+                format!("k{i}").as_bytes(),
+                format!("v{i}").as_bytes(),
+                now_unix(),
+            )
+            .unwrap();
+        }
+
+        db.merge()
+            .unwrap();
+
+        let summaries = metrics
+            .merge_summaries
+            .lock()
+            .unwrap();
+        assert_eq!(
+            summaries.len(),
+            1,
+            "expected exactly one merge summary recorded"
+        );
+        let (input_files, live_entries_copied) = summaries[0];
+        assert_eq!(
+            input_files, 10,
+            "expected merge to report all 10 rotated-out input files"
+        );
+        assert_eq!(
+            live_entries_copied, 10,
+            "expected merge to report all 10 live entries it copied forward"
+        );
+    }
+
+    /// Same setup as `merge_flushes_a_partial_final_batch_that_never_rotated`
+    /// (many small input files, reopened under a large `max_file_size` so
+    /// merge's output writer never rotates) — specifically so all 20 live
+    /// entries land in *one* batch that only `finish()`'s final flush
+    /// covers, and `record_pending_queue_depth` gets one real, multi-entry
+    /// sample instead of a string of 1s (which `max_file_size: 1` would
+    /// produce, since every entry would rotate its own batch of size 1).
+    #[test]
+    fn merge_reports_pending_queue_depth_for_the_final_batch() {
+        let dir = TempDir::new();
+        {
+            let db = Engine::open(
+                &*dir,
+                Options {
+                    max_file_size: 1,
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            for i in 0..20u32 {
+                db.put(
+                    format!("k{i}").as_bytes(),
+                    format!("v{i}").as_bytes(),
+                    now_unix(),
+                )
+                .unwrap();
+            }
+        }
+
+        let metrics = Arc::new(GaugeRecordingMetrics::default());
+        let db = Engine::open(
+            &*dir,
+            Options {
+                metrics: Some(metrics.clone() as Arc<dyn crate::Metrics>),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        db.merge()
+            .unwrap();
+
+        let depths = metrics
+            .pending_queue_depths
+            .lock()
+            .unwrap();
+        assert_eq!(
+            depths.as_slice(),
+            &[20],
+            "expected exactly one pending-queue-depth sample, for the whole \
+             un-rotated final batch"
+        );
     }
 
     /// `read_all_entries`'s `pos` bookkeeping is purely derived (the actual

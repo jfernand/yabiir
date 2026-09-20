@@ -55,4 +55,18 @@ impl PendingQueue {
         self.0
             .drain(range)
     }
+
+    /// How many repoints are queued right now — observability only (see
+    /// `Metrics::record_pending_queue_depth`), not used by merge's own
+    /// batching logic (that's driven by `write_live_entry`'s own
+    /// `pending_since_flush` counter in `output_writer.rs`, not this).
+    pub(crate) fn len(&self) -> usize {
+        self.0
+            .len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0
+            .is_empty()
+    }
 }

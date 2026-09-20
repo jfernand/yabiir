@@ -164,6 +164,19 @@ struct EngineMetricsCollector {
     merge_nanos: AtomicU64,
     sync_count: AtomicU64,
     sync_nanos: AtomicU64,
+    /// How many merge batches have drained so far, and the largest
+    /// pending-queue depth seen at a drain — `record_pending_queue_depth`
+    /// fires at unpredictable, bursty times (mid-merge, all within one
+    /// blocking `tick()` call), so rather than force it into a per-second
+    /// rate like the throughput sparklines, this just tracks a running
+    /// max and count — "how deep does this get, and how often".
+    merge_batches: AtomicU64,
+    max_pending_queue_depth: AtomicU64,
+    /// The most recent completed merge pass's summary — overwritten each
+    /// time, not accumulated, since "how big was the *last* pass" is more
+    /// useful here than an all-time total.
+    last_merge_input_files: AtomicU64,
+    last_merge_live_entries: AtomicU64,
 }
 
 impl EngineMetricsCollector {
@@ -202,6 +215,18 @@ impl Metrics for EngineMetricsCollector {
     }
     fn record_sync(&self, duration: Duration) {
         Self::record(&self.sync_count, &self.sync_nanos, duration);
+    }
+    fn record_pending_queue_depth(&self, depth: usize) {
+        self.merge_batches
+            .fetch_add(1, Ordering::Relaxed);
+        self.max_pending_queue_depth
+            .fetch_max(depth as u64, Ordering::Relaxed);
+    }
+    fn record_merge_summary(&self, input_files: usize, live_entries_copied: usize) {
+        self.last_merge_input_files
+            .store(input_files as u64, Ordering::Relaxed);
+        self.last_merge_live_entries
+            .store(live_entries_copied as u64, Ordering::Relaxed);
     }
 }
 
@@ -492,6 +517,7 @@ impl App {
             totals,
             charts,
             engine_totals,
+            merge_activity,
             engine_charts,
             log,
             footer,
@@ -499,6 +525,7 @@ impl App {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(16),
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(10),
             Constraint::Min(3),
@@ -598,6 +625,26 @@ impl App {
                 sync_avg_ns / 1_000_000,
             )),
             engine_totals,
+        );
+        frame.render_widget(
+            Line::from(format!(
+                "merge activity: batches {}   max pending-queue depth {}   last pass: {} \
+                 input file(s), {} live entries copied",
+                self.engine_metrics
+                    .merge_batches
+                    .load(Ordering::Relaxed),
+                self.engine_metrics
+                    .max_pending_queue_depth
+                    .load(Ordering::Relaxed),
+                self.engine_metrics
+                    .last_merge_input_files
+                    .load(Ordering::Relaxed),
+                self.engine_metrics
+                    .last_merge_live_entries
+                    .load(Ordering::Relaxed),
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
+            merge_activity,
         );
 
         let engine_chart_areas: [_; 2] =

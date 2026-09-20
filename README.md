@@ -88,9 +88,13 @@ Full design writeups — including the profiling methodology and measured before
 The crate stays backend-agnostic by default — no metrics or logging dependency is forced on you — but exposes two
 opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
 
-- **Metrics**: implement the `Metrics` trait (`record_put`/`record_get`/`record_delete`/`record_merge`/`record_sync`,
-  each given the call's duration; every method has an empty default body, so implement only what you need) and pass
-  it via `Options::metrics: Option<Arc<dyn Metrics>>`. Leaving it `None` (the default) records nothing.
+- **Metrics**: implement the `Metrics` trait and pass it via `Options::metrics: Option<Arc<dyn Metrics>>`; every
+  method has an empty default body, so implement only what you need. `record_put`/`record_get`/`record_delete`/
+  `record_merge`/`record_sync` are given each call's duration. `record_pending_queue_depth` and
+  `record_merge_summary` are gauges into what changes *during* a single merge pass rather than just how long it
+  took: the depth merge's deferred keydir-repoint queue reaches before each batch drain (which doubles as that
+  batch's size), and — once per completed pass — how many input files it compacted and how many live entries it
+  copied forward. Leaving `metrics` `None` (the default) records nothing.
 - **Structured logging and merge spans**: enable the `tracing` feature (`yabiir = { version = "...", features =
   ["tracing"] }`) to route the crate's warnings (truncated/corrupt entries found during recovery or merge) through
   `tracing::warn!` instead of `eprintln!`, and wrap merge's phases (scan, copy-forward, flush, remove old input

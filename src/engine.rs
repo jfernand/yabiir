@@ -182,6 +182,8 @@ impl Engine {
             &self.next_file_id,
             self.opts
                 .max_file_size,
+            self.metrics
+                .as_ref(),
             hook,
         )
     }
@@ -344,6 +346,8 @@ impl Bitcask for Engine {
             &self.next_file_id,
             self.opts
                 .max_file_size,
+            self.metrics
+                .as_ref(),
         );
         if result.is_ok() {
             self.metrics

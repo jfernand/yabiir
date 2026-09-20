@@ -1,7 +1,8 @@
 //! Consumes the AT Protocol ("Bluesky") firehose — the same
 //! `com.atproto.sync.subscribeRepos` WebSocket every relay and PDS speaks —
 //! and stores every `app.bsky.feed.post` create/update/delete it sees in a
-//! `yabiir` datastore, printing each one as it arrives.
+//! `yabiir` datastore, with a `ratatui` dashboard of live throughput
+//! metrics (one running sparkline per counter) instead of a scrolling log.
 //!
 //! Unlike BGP's BMP (the other live-feed protocol considered for this
 //! example), the AT Proto firehose is genuinely subscriber-initiated: any
@@ -16,20 +17,32 @@
 //!
 //! Run with: `cargo run --example bsky_firehose [dir]` (`dir` defaults to a
 //! directory under the OS temp dir, printed on startup, kept across runs).
-//! Stop with Ctrl+C.
+//! `q`/`Esc` to quit.
 
+use std::collections::VecDeque;
 use std::io::Cursor as IoCursor;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use atrium_api::app::bsky::feed::post::RecordData as PostRecordData;
 use atrium_api::com::atproto::sync::subscribe_repos::CommitData;
-use futures_util::StreamExt;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use futures_util::io::Cursor as AsyncCursor;
+use futures_util::{StreamExt, TryStreamExt};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::{Color, Style};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use yabiir::{Bitcask, Engine, Options, now_unix};
 
 const FIREHOSE_URL: &str = "wss://bsky.network/xrpc/com.atproto.sync.subscribeRepos";
 const POST_COLLECTION: &str = "app.bsky.feed.post";
+/// How many one-second samples each sparkline keeps — 120 = 2 minutes of
+/// history scrolling by.
+const HISTORY_LEN: usize = 120;
+const LOG_LEN: usize = 200;
 
 /// The two-value framing every firehose message uses: a header naming the
 /// message type (only meaningful when `op == 1`; `op == -1` is an error
@@ -74,6 +87,331 @@ fn truncate_for_display(s: &str, max_chars: usize) -> String {
     out.replace('\n', " ")
 }
 
+/// One observable counter: a running total, the count accumulated in the
+/// current (not-yet-elapsed) second, and a bounded history of completed
+/// per-second counts — exactly what a `Sparkline` needs to draw a running
+/// chart, and cheap to maintain (`record` is just an add, `tick` runs once
+/// a second).
+struct Metric {
+    label: &'static str,
+    total: u64,
+    this_tick: u64,
+    history: VecDeque<u64>,
+}
+
+impl Metric {
+    fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            total: 0,
+            this_tick: 0,
+            history: VecDeque::with_capacity(HISTORY_LEN),
+        }
+    }
+
+    fn record(&mut self, n: u64) {
+        self.total += n;
+        self.this_tick += n;
+    }
+
+    /// Close out the current second: push it onto history (dropping the
+    /// oldest sample once full) and start a fresh one.
+    fn tick(&mut self) {
+        if self
+            .history
+            .len()
+            >= HISTORY_LEN
+        {
+            self.history
+                .pop_front();
+        }
+        self.history
+            .push_back(self.this_tick);
+        self.this_tick = 0;
+    }
+
+    fn last_rate(&self) -> u64 {
+        self.history
+            .back()
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+struct App {
+    db: Engine,
+    started: Instant,
+    frames: Metric,
+    stored: Metric,
+    deleted: Metric,
+    /// Frames that weren't a `#commit`, commits with no `app.bsky.feed.post`
+    /// ops, and post ops that failed to decode — everything this example
+    /// deliberately doesn't act on, bucketed into one counter so it's still
+    /// visible that the firehose carries far more than just posts.
+    skipped: Metric,
+    log: VecDeque<String>,
+}
+
+impl App {
+    fn new(db: Engine) -> Self {
+        Self {
+            db,
+            started: Instant::now(),
+            frames: Metric::new("Frames/s"),
+            stored: Metric::new("Posts stored/s"),
+            deleted: Metric::new("Posts deleted/s"),
+            skipped: Metric::new("Skipped/s"),
+            log: VecDeque::with_capacity(LOG_LEN),
+        }
+    }
+
+    fn tick(&mut self) {
+        self.frames
+            .tick();
+        self.stored
+            .tick();
+        self.deleted
+            .tick();
+        self.skipped
+            .tick();
+    }
+
+    fn log(&mut self, line: String) {
+        if self
+            .log
+            .len()
+            >= LOG_LEN
+        {
+            self.log
+                .pop_front();
+        }
+        self.log
+            .push_back(line);
+    }
+
+    async fn handle_frame(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        self.frames
+            .record(1);
+
+        let mut cursor = IoCursor::new(bytes);
+        let header: FrameHeader = serde_ipld_dagcbor::de::from_reader_once(&mut cursor)?;
+        if header.op != 1
+            || header
+                .t
+                .as_deref()
+                != Some("#commit")
+        {
+            self.skipped
+                .record(1);
+            return Ok(());
+        }
+        let commit: CommitData = serde_ipld_dagcbor::de::from_reader_once(&mut cursor)?;
+
+        let post_ops: Vec<_> = commit
+            .ops
+            .iter()
+            .filter(|op| {
+                op.path
+                    .starts_with(&format!("{POST_COLLECTION}/"))
+            })
+            .collect();
+        if post_ops.is_empty() {
+            self.skipped
+                .record(1);
+            return Ok(());
+        }
+
+        // The commit's `blocks` is a CAR file covering only what changed in
+        // this one commit — decoded lazily, and only once per frame, since
+        // a frame with nothing but deletes never needs it.
+        let mut car_blocks: Option<Vec<(String, Vec<u8>)>> = None;
+
+        for op in post_ops {
+            let Some(rkey) = op
+                .path
+                .rsplit('/')
+                .next()
+            else {
+                self.skipped
+                    .record(1);
+                continue;
+            };
+            let key = post_key(
+                commit
+                    .repo
+                    .as_str(),
+                rkey,
+            );
+
+            match op
+                .action
+                .as_str()
+            {
+                "delete" => {
+                    self.db
+                        .delete(&key, now_unix())?;
+                    self.deleted
+                        .record(1);
+                    self.log(format!(
+                        "[{}] {rkey}: (deleted)",
+                        commit
+                            .repo
+                            .as_str()
+                    ));
+                }
+                "create" | "update" => {
+                    let Some(cid_link) = &op.cid else {
+                        self.skipped
+                            .record(1);
+                        continue;
+                    };
+                    if car_blocks.is_none() {
+                        let mut reader = AsyncCursor::new(
+                            commit
+                                .blocks
+                                .as_slice(),
+                        );
+                        let (blocks, _header) = rs_car::car_read_all(&mut reader, false).await?;
+                        car_blocks = Some(
+                            blocks
+                                .into_iter()
+                                .map(|(cid, bytes)| (cid.to_string(), bytes))
+                                .collect(),
+                        );
+                    }
+                    let target = cid_link
+                        .0
+                        .to_string();
+                    let Some((_, block_bytes)) = car_blocks
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .find(|(cid, _)| *cid == target)
+                    else {
+                        self.skipped
+                            .record(1); // referenced block not in this commit's diff
+                        continue;
+                    };
+                    let Ok(record) = serde_ipld_dagcbor::from_slice::<PostRecordData>(block_bytes)
+                    else {
+                        self.skipped
+                            .record(1); // not decodable as a post record
+                        continue;
+                    };
+                    let created_at = record
+                        .created_at
+                        .as_str()
+                        .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                        .map(|dt| {
+                            dt.timestamp()
+                                .max(0) as u32
+                        })
+                        .unwrap_or_else(|_| now_unix());
+                    self.db
+                        .put(&key, &encode_post(&record.text, created_at), now_unix())?;
+                    self.stored
+                        .record(1);
+                    self.log(format!(
+                        "[{}] {rkey}: {}",
+                        commit
+                            .repo
+                            .as_str(),
+                        truncate_for_display(&record.text, 140)
+                    ));
+                }
+                _ => self
+                    .skipped
+                    .record(1),
+            }
+        }
+        Ok(())
+    }
+
+    fn draw(&self, frame: &mut Frame) {
+        let [header, totals, charts, log, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(16),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
+
+        let uptime = self
+            .started
+            .elapsed()
+            .as_secs();
+        frame.render_widget(
+            Line::from(format!(
+                "yabiir bsky firehose — connected — uptime {uptime}s"
+            )),
+            header,
+        );
+        frame.render_widget(
+            Line::from(format!(
+                "stored: {}   deleted: {}   frames: {}   skipped: {}",
+                self.stored
+                    .total,
+                self.deleted
+                    .total,
+                self.frames
+                    .total,
+                self.skipped
+                    .total
+            )),
+            totals,
+        );
+
+        let chart_areas: [_; 4] = Layout::horizontal([
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+        ])
+        .areas(charts);
+        for (area, metric) in chart_areas
+            .iter()
+            .zip([&self.frames, &self.stored, &self.deleted, &self.skipped])
+        {
+            let data: Vec<u64> = metric
+                .history
+                .iter()
+                .copied()
+                .collect();
+            let sparkline = Sparkline::default()
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("{} ({}/s)", metric.label, metric.last_rate())),
+                )
+                .data(&data)
+                .style(Style::default().fg(Color::Cyan));
+            frame.render_widget(sparkline, *area);
+        }
+
+        let items: Vec<ListItem> = self
+            .log
+            .iter()
+            .rev()
+            .take(log.height as usize)
+            .map(|line| ListItem::new(line.as_str()))
+            .collect();
+        frame.render_widget(
+            List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Activity"),
+            ),
+            log,
+        );
+
+        frame.render_widget(
+            Paragraph::new("q/Esc to quit").style(Style::default().fg(Color::DarkGray)),
+            footer,
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // tokio-tungstenite's rustls backend needs an explicit process-wide
@@ -86,158 +424,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("yabiir-bsky-firehose"));
-    println!("using datastore at {}", dir.display());
     let db = Engine::open(&dir, Options::default())?;
 
-    println!("connecting to {FIREHOSE_URL}");
     let (ws, _response) = tokio_tungstenite::connect_async(FIREHOSE_URL).await?;
     let (_write, mut read) = ws.split();
-    println!("connected — streaming posts, press Ctrl+C to stop");
 
-    let mut stored = 0u64;
-    let mut deleted = 0u64;
+    let mut terminal = ratatui::init();
+    let mut app = App::new(db);
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
 
-    loop {
+    let result = 'outer: loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("\nstopping: stored {stored} post(s), deleted {deleted}");
-                break;
+            _ = tick.tick() => {
+                app.tick();
+                if let Err(err) = terminal.draw(|f| app.draw(f)) {
+                    break 'outer Err(err.into());
+                }
+            }
+            event = events.try_next() => {
+                match event {
+                    Ok(Some(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                            break 'outer Ok(());
+                        }
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => break 'outer Ok(()), // terminal input closed
+                    Err(err) => break 'outer Err(err.into()),
+                }
             }
             frame = read.next() => {
-                let Some(frame) = frame else {
-                    println!("firehose closed the connection");
-                    break;
-                };
-                let WsMessage::Binary(bytes) = frame? else {
-                    continue; // ping/pong/text/close — nothing to decode
-                };
-                if let Err(err) = handle_frame(&db, &bytes, &mut stored, &mut deleted).await {
-                    eprintln!("warning: skipping one frame: {err}");
+                match frame {
+                    Some(Ok(WsMessage::Binary(bytes))) => {
+                        if let Err(err) = app.handle_frame(&bytes).await {
+                            app.log(format!("warning: skipping one frame: {err}"));
+                        }
+                    }
+                    Some(Ok(_)) => {} // ping/pong/text/close — nothing to decode
+                    Some(Err(err)) => break 'outer Err(err.into()),
+                    None => break 'outer Ok(()), // firehose closed the connection
                 }
             }
         }
-    }
+    };
 
-    db.close()?;
-    Ok(())
-}
-
-async fn handle_frame(
-    db: &Engine,
-    bytes: &[u8],
-    stored: &mut u64,
-    deleted: &mut u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cursor = IoCursor::new(bytes);
-    let header: FrameHeader = serde_ipld_dagcbor::de::from_reader_once(&mut cursor)?;
-    if header.op != 1
-        || header
-            .t
-            .as_deref()
-            != Some("#commit")
-    {
-        return Ok(());
-    }
-    let commit: CommitData = serde_ipld_dagcbor::de::from_reader_once(&mut cursor)?;
-
-    let post_ops: Vec<_> = commit
-        .ops
-        .iter()
-        .filter(|op| {
-            op.path
-                .starts_with(&format!("{POST_COLLECTION}/"))
-        })
-        .collect();
-    if post_ops.is_empty() {
-        return Ok(());
-    }
-
-    // The commit's `blocks` is a CAR file covering only what changed in
-    // this one commit — decoded lazily, and only once per frame, since a
-    // frame with nothing but deletes never needs it.
-    let mut car_blocks: Option<Vec<(String, Vec<u8>)>> = None;
-
-    for op in post_ops {
-        let Some(rkey) = op
-            .path
-            .rsplit('/')
-            .next()
-        else {
-            continue;
-        };
-        let key = post_key(
-            commit
-                .repo
-                .as_str(),
-            rkey,
-        );
-
-        match op
-            .action
-            .as_str()
-        {
-            "delete" => {
-                db.delete(&key, now_unix())?;
-                *deleted += 1;
-                println!(
-                    "[{}] {rkey}: (deleted)",
-                    commit
-                        .repo
-                        .as_str()
-                );
-            }
-            "create" | "update" => {
-                let Some(cid_link) = &op.cid else { continue };
-                if car_blocks.is_none() {
-                    let mut reader = AsyncCursor::new(
-                        commit
-                            .blocks
-                            .as_slice(),
-                    );
-                    let (blocks, _header) = rs_car::car_read_all(&mut reader, false).await?;
-                    car_blocks = Some(
-                        blocks
-                            .into_iter()
-                            .map(|(cid, bytes)| (cid.to_string(), bytes))
-                            .collect(),
-                    );
-                }
-                let target = cid_link
-                    .0
-                    .to_string();
-                let Some((_, block_bytes)) = car_blocks
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .find(|(cid, _)| *cid == target)
-                else {
-                    continue; // referenced block not in this commit's diff
-                };
-                let Ok(record) = serde_ipld_dagcbor::from_slice::<PostRecordData>(block_bytes)
-                else {
-                    continue; // not decodable as a post record - skip, don't fail the frame
-                };
-                let created_at = record
-                    .created_at
-                    .as_str()
-                    .parse::<chrono::DateTime<chrono::FixedOffset>>()
-                    .map(|dt| {
-                        dt.timestamp()
-                            .max(0) as u32
-                    })
-                    .unwrap_or_else(|_| now_unix());
-                db.put(&key, &encode_post(&record.text, created_at), now_unix())?;
-                *stored += 1;
-                println!(
-                    "[{}] {rkey}: {}",
-                    commit
-                        .repo
-                        .as_str(),
-                    truncate_for_display(&record.text, 140)
-                );
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    ratatui::restore();
+    app.db
+        .close()?;
+    result
 }

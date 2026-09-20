@@ -39,17 +39,16 @@ path = "src/bin/kv.rs"
 criterion = "0.8.2"
 proptest = "1"
 ratatui = "0.29"
-crossterm = "0.28"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 futures-util = "0.3.34"
 atrium-api = "0.25.8"
 rs-car = "0.5.0"
 serde_ipld_dagcbor = "0.7.0"
-cid = "0.11.3"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 chrono = "0.4.45"
 serde = { version = "1.0.229", features = ["derive"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
 
 [[bench]]
 name = "format"

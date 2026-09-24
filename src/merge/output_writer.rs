@@ -24,6 +24,11 @@ pub struct MergeOutputWriter<'a> {
     max_file_size: u64,
     current_data: ActiveFile,
     current_hint: BufWriter<File>,
+    /// Running CRC32 over every record written to `current_hint` so far —
+    /// finalized into a trailing 4-byte CRC (see `format::hint`'s module
+    /// doc) whenever this hint file is closed out, in `rotate`/`finish`.
+    /// Reset alongside `current_hint` on every rotation.
+    hint_crc: crc32fast::Hasher,
     /// Live entries written since the last flush (via `write_unflushed`) —
     /// reset on every flush, whether from hitting `MERGE_FLUSH_BATCH_SIZE`
     /// or from a rotation boundary.
@@ -43,6 +48,7 @@ impl<'a> MergeOutputWriter<'a> {
             max_file_size,
             current_data,
             current_hint,
+            hint_crc: crc32fast::Hasher::new(),
             pending_since_flush: 0,
         })
     }
@@ -84,6 +90,8 @@ impl<'a> MergeOutputWriter<'a> {
         let hint = format::encode_hint(&entry.key, &entry.header, value_pos);
         self.current_hint
             .write_all(hint.as_bytes())?;
+        self.hint_crc
+            .update(hint.as_bytes());
         self.pending_since_flush += 1;
 
         let flushed = self.rotate_or_flush()?;
@@ -128,11 +136,11 @@ impl<'a> MergeOutputWriter<'a> {
     fn rotate(&mut self) -> io::Result<()> {
         self.current_data
             .sync()?;
-        self.current_hint
-            .flush()?; // XXX why not sync?
+        self.close_current_hint_file()?;
         let (data, hint) = Self::open_output(self.dir, self.next_file_id)?;
         self.current_data = data;
         self.current_hint = hint;
+        self.hint_crc = crc32fast::Hasher::new();
         self.pending_since_flush = 0;
         Ok(())
     }
@@ -140,8 +148,21 @@ impl<'a> MergeOutputWriter<'a> {
     pub(crate) fn finish(mut self) -> io::Result<()> {
         self.current_data
             .sync()?;
-        self.current_hint
-            .flush()?;
+        self.close_current_hint_file()?;
         Ok(())
+    }
+
+    /// Write the whole-file trailing CRC32 (see `format::hint`'s module
+    /// doc) over every record written to `current_hint` so far, then flush
+    /// (not fsync — see the crash-safety discussion in `docs/`: an
+    /// incomplete hint file simply fails `verify_hint_file` on the next
+    /// recovery and falls back to a full scan of the — properly fsynced —
+    /// data file, so this doesn't need its own durability guarantee).
+    fn close_current_hint_file(&mut self) -> io::Result<()> {
+        let crc = std::mem::take(&mut self.hint_crc).finalize();
+        self.current_hint
+            .write_all(&crc.to_le_bytes())?;
+        self.current_hint
+            .flush()
     }
 }

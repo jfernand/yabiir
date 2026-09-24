@@ -18,9 +18,11 @@
 //! 16+ksz  value_sz  value
 //! ```
 //!
-//! Hint file layout (20-byte header, no CRC — hint files are a rebuildable
-//! cache; a corrupt or missing one just falls back to scanning the data
-//! file):
+//! Hint file layout: zero or more 20-byte-header records (no per-record
+//! CRC — matching upstream Bitcask's own design), followed by a single
+//! 4-byte whole-file CRC32 trailer covering every record's bytes. A
+//! corrupt, truncated, or missing hint file falls back to scanning the
+//! data file — see `crate::recovery` and `format::hint::verify_hint_file`.
 //!
 //! ```text
 //! offset  size  field
@@ -29,6 +31,8 @@
 //! 8       4     value_sz
 //! 12      8     value_pos      position of the VALUE bytes in the data file
 //! 20      ksz   key
+//! ...     ...   (repeated for each record)
+//! end-4   4     crc32          CRC32 of every record's bytes, concatenated
 //! ```
 //!
 //! See `docs/bitcask-implementation-plan.md` §1 for the full rationale,
@@ -43,7 +47,8 @@ pub use entry::{
     verify_crc,
 };
 pub use hint::{
-    EncodedHint, HINT_HEADER_SIZE, HintRead, decode_hint_header, encode_hint, read_hint,
+    EncodedHint, HINT_HEADER_SIZE, HINT_TRAILER_SIZE, HintRead, decode_hint_header, encode_hint,
+    read_hint, verify_hint_file,
 };
 
 use std::io::{self, Read};

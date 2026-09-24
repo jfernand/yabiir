@@ -1,11 +1,24 @@
 //! `.bitcask.hint` record encoding/decoding. See the parent module
 //! (`crate::format`) for the full on-disk byte layout this implements.
+//!
+//! Individual hint records carry no CRC of their own — matching upstream
+//! Bitcask's own design (`bitcask_fileops.erl`), not an oversight. Instead
+//! a finished hint file ends with a 4-byte trailer: the CRC32 of every
+//! record's bytes concatenated (see [`HINT_TRAILER_SIZE`] /
+//! [`verify_hint_file`]). A hint file is only ever trusted as a whole —
+//! `crate::recovery` verifies this trailer before parsing a single record,
+//! and falls back to a full scan of the data file on any failure (missing
+//! trailer, mismatched CRC, or an out-of-bounds pointer), the same way
+//! upstream does.
 
 use std::io::{self, Read};
 
 use super::{EntryHeader, decode_key_size, encode_key_size, read_up_to};
 
 pub const HINT_HEADER_SIZE: usize = 20;
+/// Size of the whole-file trailing CRC32 appended after a hint file's last
+/// record. See this module's doc comment.
+pub const HINT_TRAILER_SIZE: usize = 4;
 
 /// A fully-encoded hint-file record, ready to be appended verbatim to a
 /// `.bitcask.hint` file.
@@ -134,6 +147,29 @@ pub fn read_hint<R: Read>(r: &mut R) -> io::Result<Option<HintRead>> {
     }))
 }
 
+/// Verify a whole hint file's trailing CRC32 (the last
+/// [`HINT_TRAILER_SIZE`] bytes) against everything before it. Returns the
+/// record content with the trailer stripped off on success, `None` if the
+/// file is too short to even contain a trailer or the CRC doesn't match —
+/// either way, the caller should treat the whole file as untrustworthy,
+/// not attempt to parse any records from it.
+pub fn verify_hint_file(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < HINT_TRAILER_SIZE {
+        return None;
+    }
+    let (content, trailer) = bytes.split_at(bytes.len() - HINT_TRAILER_SIZE);
+    let expected = u32::from_le_bytes(
+        trailer
+            .try_into()
+            .unwrap(),
+    );
+    if crc32fast::hash(content) == expected {
+        Some(content)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +231,54 @@ mod tests {
                 other => panic!("cut at {cut}: expected Truncated, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn verify_hint_file_accepts_a_correctly_trailered_file() {
+        let header = EntryHeader {
+            timestamp: 1,
+            key_size: 1,
+            value_size: 1,
+            tombstone: false,
+        };
+        let mut content = encode_hint(b"a", &header, 0).into_bytes();
+        content.extend_from_slice(&encode_hint(b"b", &header, 1).into_bytes());
+        let trailer = crc32fast::hash(&content).to_le_bytes();
+        let mut file_bytes = content.clone();
+        file_bytes.extend_from_slice(&trailer);
+
+        let verified = verify_hint_file(&file_bytes).expect("valid trailer should verify");
+        assert_eq!(verified, content.as_slice());
+    }
+
+    #[test]
+    fn verify_hint_file_rejects_corrupted_content() {
+        let header = EntryHeader {
+            timestamp: 1,
+            key_size: 1,
+            value_size: 1,
+            tombstone: false,
+        };
+        let content = encode_hint(b"a", &header, 0).into_bytes();
+        let trailer = crc32fast::hash(&content).to_le_bytes();
+        let mut file_bytes = content;
+        file_bytes.extend_from_slice(&trailer);
+        file_bytes[0] ^= 0xFF; // flip a bit inside a record, after computing the trailer
+
+        assert!(verify_hint_file(&file_bytes).is_none());
+    }
+
+    #[test]
+    fn verify_hint_file_rejects_a_file_too_short_to_hold_a_trailer() {
+        assert!(verify_hint_file(&[0u8; HINT_TRAILER_SIZE - 1]).is_none());
+    }
+
+    #[test]
+    fn verify_hint_file_accepts_an_empty_hint_file() {
+        // A merge input with no live entries at all still finishes its
+        // (empty) hint file with a trailer — the CRC of zero bytes.
+        let trailer = crc32fast::hash(&[]).to_le_bytes();
+        assert_eq!(verify_hint_file(&trailer), Some(&[][..]));
     }
 
     #[test]

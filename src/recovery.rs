@@ -2,7 +2,7 @@
 //! when opening an existing Bitcask directory. See
 //! `docs/bitcask-implementation-plan.md` §6.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io;
 use std::path::Path;
 
@@ -12,8 +12,13 @@ use crate::keydir::{Keydir, KeydirEntry};
 
 /// Rebuild `keydir` from `file_ids` (as returned by [`DataFileSet::discover`],
 /// ascending), preferring a file's hint file (fast path, no value bytes
-/// read) when one exists, falling back to a full scan of the data file
-/// otherwise.
+/// read) when one exists *and* passes validation, falling back to a full
+/// scan of the data file otherwise — a missing hint file, a failed
+/// whole-file CRC check (`format::verify_hint_file`), or a record whose
+/// pointer doesn't fit inside the data file all count as "doesn't pass
+/// validation". A hint file is only ever trusted as a whole: nothing from
+/// an invalid one is applied to `keydir` before falling back, matching
+/// upstream Bitcask's own behavior (`bitcask_fileops.erl`'s `fold_keys`).
 ///
 /// Files are processed in ascending `file_id` order, and entries within a
 /// file in ascending offset order; combined with [`apply_entry`]'s
@@ -32,11 +37,11 @@ pub fn recover(dir: &Path, file_ids: &[u32], keydir: &mut Keydir) -> io::Result<
         .enumerate()
     {
         let is_last = index + 1 == file_ids.len();
+        let data_path = DataFileSet::data_path(dir, file_id);
         let hint_path = DataFileSet::hint_path(dir, file_id);
-        if hint_path.exists() {
-            scan_hint_file(&hint_path, file_id, keydir)?;
-        } else {
-            let data_path = DataFileSet::data_path(dir, file_id);
+        let used_hint =
+            hint_path.exists() && try_scan_hint_file(&hint_path, file_id, &data_path, keydir)?;
+        if !used_hint {
             scan_data_file(&data_path, file_id, is_last, keydir)?;
         }
     }
@@ -112,48 +117,86 @@ fn scan_data_file(path: &Path, file_id: u32, is_last: bool, keydir: &mut Keydir)
 
 /// Fast-path recovery from a hint file: no value bytes to read, and
 /// `value_pos` is carried directly in each record rather than derived from
-/// a running offset.
-fn scan_hint_file(path: &Path, file_id: u32, keydir: &mut Keydir) -> io::Result<()> {
-    let mut f = File::open(path)?;
+/// a running offset. Returns `true` if the hint file passed validation and
+/// was fully applied to `keydir`; `false` if it failed its whole-file CRC,
+/// contained a truncated record, or pointed outside the data file — in any
+/// of those cases `keydir` is left untouched by this call, and the caller
+/// falls back to [`scan_data_file`] instead. Every record is validated
+/// *before* any of them are applied, so a bad hint file never partially
+/// pollutes the keydir before the fallback runs.
+fn try_scan_hint_file(
+    hint_path: &Path,
+    file_id: u32,
+    data_path: &Path,
+    keydir: &mut Keydir,
+) -> io::Result<bool> {
+    let bytes = fs::read(hint_path)?;
+    let Some(content) = format::verify_hint_file(&bytes) else {
+        crate::log::warn!(
+            "warning: {} failed its whole-file CRC check, falling back to a full scan \
+             of the data file",
+            hint_path.display()
+        );
+        return Ok(false);
+    };
+
+    let data_file_len = fs::metadata(data_path)?.len();
+    let mut records = Vec::new();
+    let mut cursor = io::Cursor::new(content);
     loop {
-        match format::read_hint(&mut f)? {
+        match format::read_hint(&mut cursor)? {
             None => break,
             Some(HintRead::Truncated) => {
-                // Shouldn't happen for a hint file written by a completed
-                // merge, but handle it the same way as a truncated data
-                // file tail: stop, keep what was already recovered.
+                // A CRC-valid file should never actually hit this (the
+                // trailer covers every byte the writer produced), but stay
+                // defensive rather than trust that invariant blindly.
                 crate::log::warn!(
-                    "warning: {} has a truncated hint record, stopping scan there",
-                    path.display()
+                    "warning: {} has a truncated hint record despite passing its CRC \
+                     check, falling back to a full scan of the data file",
+                    hint_path.display()
                 );
-                break;
+                return Ok(false);
             }
             Some(HintRead::Ok {
                 header,
                 value_pos,
                 key,
             }) => {
-                if header.tombstone {
-                    // Merge never currently writes tombstones to hint files
-                    // (it drops dead entries during compaction instead), so
-                    // this branch is dead code today — kept for format
-                    // symmetry with scan_data_file and for future-proofing.
-                    keydir.remove(&key);
-                } else {
-                    keydir.insert(
-                        &key,
-                        KeydirEntry {
-                            file_id,
-                            value_size: header.value_size,
-                            value_pos,
-                            timestamp: header.timestamp,
-                        },
+                if value_pos.saturating_add(header.value_size as u64) > data_file_len {
+                    crate::log::warn!(
+                        "warning: {} has an out-of-bounds pointer (value_pos {value_pos} + \
+                         value_size {} > data file length {data_file_len}), falling back to \
+                         a full scan of the data file",
+                        hint_path.display(),
+                        header.value_size
                     );
+                    return Ok(false);
                 }
+                records.push((header, value_pos, key));
             }
         }
     }
-    Ok(())
+
+    for (header, value_pos, key) in records {
+        if header.tombstone {
+            // Merge never currently writes tombstones to hint files (it
+            // drops dead entries during compaction instead), so this
+            // branch is dead code today — kept for format symmetry with
+            // scan_data_file and for future-proofing.
+            keydir.remove(&key);
+        } else {
+            keydir.insert(
+                &key,
+                KeydirEntry {
+                    file_id,
+                    value_size: header.value_size,
+                    value_pos,
+                    timestamp: header.timestamp,
+                },
+            );
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -231,6 +274,26 @@ mod tests {
             .unwrap()
     }
 
+    /// Write a well-formed hint file (records + a correct trailing CRC) for
+    /// `file_id`, so a test can drive the hint-based fast path directly
+    /// instead of the full-scan fallback.
+    fn write_valid_hint_file(
+        dir: &Path,
+        file_id: u32,
+        records: &[(&[u8], u64, format::EntryHeader)],
+    ) {
+        let mut content = Vec::new();
+        for (key, value_pos, header) in records {
+            content.extend_from_slice(format::encode_hint(key, header, *value_pos).as_bytes());
+        }
+        let trailer = crc32fast::hash(&content).to_le_bytes();
+        let mut file = File::create(DataFileSet::hint_path(dir, file_id)).unwrap();
+        file.write_all(&content)
+            .unwrap();
+        file.write_all(&trailer)
+            .unwrap();
+    }
+
     #[test]
     fn full_scan_recovery_is_last_write_wins() {
         let dir = TempDir::new();
@@ -302,13 +365,10 @@ mod tests {
             .unwrap();
         drop(active0);
 
-        // Hand-write file 0's hint file describing exactly what's in it.
-        let mut hint = File::create(DataFileSet::hint_path(&dir, 0)).unwrap();
-        hint.write_all(format::encode_hint(b"a", &a_header, a_pos).as_bytes())
-            .unwrap();
-        hint.write_all(format::encode_hint(b"b", &b_header, b_pos).as_bytes())
-            .unwrap();
-        drop(hint);
+        // Hand-write file 0's hint file describing exactly what's in it,
+        // with a valid trailer so this actually exercises the hint-based
+        // fast path (see try_scan_hint_file), not the fallback.
+        write_valid_hint_file(&dir, 0, &[(b"a", a_pos, a_header), (b"b", b_pos, b_header)]);
 
         let mut active1 = ActiveFile::create(&dir, 1).unwrap();
         write_entry(&dir, &mut active1, b"a", b"a-v2", false, 3);
@@ -350,6 +410,125 @@ mod tests {
             b"c-v1"
         );
         assert_eq!(keydir.len(), 3);
+    }
+
+    /// A hint file that fails its whole-file CRC check must not be trusted
+    /// at all — recovery falls back to a full scan of the data file for
+    /// that file_id and still gets the exactly correct result, not a
+    /// partially-applied mix of bad hint data and real data.
+    #[test]
+    fn hint_file_with_invalid_crc_falls_back_to_full_scan() {
+        let dir = TempDir::new();
+        let mut active = ActiveFile::create(&dir, 0).unwrap();
+        write_entry(&dir, &mut active, b"a", b"a-v1", false, 1);
+        write_entry(&dir, &mut active, b"b", b"b-v1", false, 2);
+        active
+            .sync()
+            .unwrap();
+        drop(active);
+
+        // A hint file whose content doesn't match its own trailer at all —
+        // and, worse, describes a key ("x") that was never really written,
+        // at a bogus offset. If this were trusted, recovery would produce
+        // a wrong keydir; falling back must ignore it completely.
+        let bogus_header = format::EntryHeader {
+            timestamp: 99,
+            key_size: 1,
+            value_size: 4,
+            tombstone: false,
+        };
+        let mut file = File::create(DataFileSet::hint_path(&dir, 0)).unwrap();
+        file.write_all(format::encode_hint(b"x", &bogus_header, 0).as_bytes())
+            .unwrap();
+        file.write_all(&0u32.to_le_bytes()) // wrong trailer, not this content's real CRC
+            .unwrap();
+        drop(file);
+
+        let file_ids = DataFileSet::discover(&dir).unwrap();
+        let mut keydir = Keydir::new();
+        recover(&dir, &file_ids, &mut keydir).unwrap();
+
+        assert_eq!(
+            keydir.get(b"x"),
+            None,
+            "bogus hint-only key must not appear"
+        );
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"a")
+                    .unwrap()
+            ),
+            b"a-v1"
+        );
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"b")
+                    .unwrap()
+            ),
+            b"b-v1"
+        );
+        assert_eq!(keydir.len(), 2);
+    }
+
+    /// A hint file that passes its CRC (so it wasn't corrupted or torn) but
+    /// contains a pointer past the end of the data file — internally
+    /// inconsistent in a way a checksum alone can't catch (e.g. a hint file
+    /// misattributed to the wrong data file) — must also fall back rather
+    /// than hand out a `KeydirEntry` a read would fail (or worse, silently
+    /// misread neighboring bytes) on.
+    #[test]
+    fn hint_file_with_out_of_bounds_pointer_falls_back_to_full_scan() {
+        let dir = TempDir::new();
+        let mut active = ActiveFile::create(&dir, 0).unwrap();
+        let (a_pos, _, a_header) = write_entry(&dir, &mut active, b"a", b"a-v1", false, 1);
+        active
+            .sync()
+            .unwrap();
+        drop(active);
+
+        let data_len = fs::metadata(DataFileSet::data_path(&dir, 0))
+            .unwrap()
+            .len();
+        let out_of_bounds_header = format::EntryHeader {
+            timestamp: 1,
+            key_size: 1,
+            value_size: 4,
+            tombstone: false,
+        };
+        // A pointer that starts exactly at EOF — value_size alone already
+        // pushes it past the file's real length.
+        write_valid_hint_file(
+            &dir,
+            0,
+            &[
+                (b"a", a_pos, a_header),
+                (b"z", data_len, out_of_bounds_header),
+            ],
+        );
+
+        let file_ids = DataFileSet::discover(&dir).unwrap();
+        let mut keydir = Keydir::new();
+        recover(&dir, &file_ids, &mut keydir).unwrap();
+
+        assert_eq!(
+            keydir.get(b"z"),
+            None,
+            "out-of-bounds hint key must not appear"
+        );
+        assert_eq!(
+            read_value(
+                &dir,
+                keydir
+                    .get(b"a")
+                    .unwrap()
+            ),
+            b"a-v1"
+        );
+        assert_eq!(keydir.len(), 1);
     }
 
     #[test]

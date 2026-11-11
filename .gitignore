@@ -10,3 +10,5 @@ restart
 /perf-report.txt
 /*.csv
 /mutants.out
+# the book PDF is built from book/ by book/tools/build.sh
+/book/databases.pdf

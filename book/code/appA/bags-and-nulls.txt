@@ -1,0 +1,25 @@
+3.53.4 2026-07-24
+q|rows
+receipt|3
+q|rows
+distinct receipt|2
+q|total
+total|490
+q|total
+total of distinct|370
+q|rows
+IN|4
+q|rows
+JOIN|6
+q|rows
+NOT IN, no NULL|1
+q|rows
+NOT IN, one NULL|0
+q|rows
+NOT EXISTS, one NULL|1
+q|result
+NULL = NULL|NULL
+q|result
+NULL <> NULL|NULL
+q|rows
+NULLs under UNIQUE|3

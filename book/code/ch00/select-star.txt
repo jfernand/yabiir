@@ -1,0 +1,18 @@
+$ select-star DIR
+ key         | value
+-------------+-------
+ ibm-pc      | 1981
+ apple-ii    | 1977
+ bbc-micro   | 1981
+ c64         | 1982
+ zx-spectrum | 1982
+(5 rows)
+$ select-star DIR
+ key         | value
+-------------+-------
+ bbc-micro   | 1981
+ apple-ii    | 1977
+ zx-spectrum | 1982
+ ibm-pc      | 1981
+ c64         | 1982
+(5 rows)

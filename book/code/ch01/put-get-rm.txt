@@ -1,0 +1,14 @@
+$ kv DIR add lang rust
+$ xxd 00000000000000000000.bitcask.data  # 24 bytes
+00000000: 28a8 14d1 1dcd f36a 0400 0000 0400 0000  (......j........
+00000010: 6c61 6e67 7275 7374                      langrust
+$ kv DIR get lang
+rust
+$ kv DIR rm lang
+$ xxd 00000000000000000000.bitcask.data  # 24 bytes
+00000000: 28a8 14d1 1dcd f36a 0400 0000 0400 0000  (......j........
+00000010: 6c61 6e67 7275 7374                      langrust
+$ xxd 00000000000000000001.bitcask.data  # 0 bytes
+$ xxd 00000000000000000002.bitcask.data  # 20 bytes
+00000000: 126b 6b2f 1dcd f36a 0400 0080 0000 0000  .kk/...j........
+00000010: 6c61 6e67                                lang

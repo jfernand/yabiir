@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>name</key><string>ISSS Dark</string>
+  <key>settings</key>
+  <array>
+    <dict><key>settings</key><dict>
+      <key>background</key><string>#1A1A1A</string>
+      <key>foreground</key><string>#F0EBE1</string>
+    </dict></dict>
+    <dict><key>scope</key><string>comment, punctuation.definition.comment</string>
+      <key>settings</key><dict><key>foreground</key><string>#888888</string><key>fontStyle</key><string>italic</string></dict></dict>
+    <dict><key>scope</key><string>keyword, storage, storage.type, storage.modifier, keyword.control, keyword.operator.new</string>
+      <key>settings</key><dict><key>foreground</key><string>#F5B800</string></dict></dict>
+    <dict><key>scope</key><string>string, string.quoted</string>
+      <key>settings</key><dict><key>foreground</key><string>#7FCF95</string></dict></dict>
+    <dict><key>scope</key><string>constant.numeric, constant.language, constant.character</string>
+      <key>settings</key><dict><key>foreground</key><string>#FFCC33</string></dict></dict>
+    <dict><key>scope</key><string>entity.name.function, support.function, meta.function-call</string>
+      <key>settings</key><dict><key>foreground</key><string>#FAFAF8</string><key>fontStyle</key><string>bold</string></dict></dict>
+    <dict><key>scope</key><string>entity.name.type, entity.name.class, support.class, support.type, storage.type.java</string>
+      <key>settings</key><dict><key>foreground</key><string>#8FC1EC</string></dict></dict>
+    <dict><key>scope</key><string>variable.parameter, variable.other</string>
+      <key>settings</key><dict><key>foreground</key><string>#F0EBE1</string></dict></dict>
+    <dict><key>scope</key><string>storage.type.annotation, punctuation.definition.annotation, meta.annotation</string>
+      <key>settings</key><dict><key>foreground</key><string>#E5A000</string></dict></dict>
+    <dict><key>scope</key><string>punctuation, keyword.operator</string>
+      <key>settings</key><dict><key>foreground</key><string>#CCCCCC</string></dict></dict>
+    <dict><key>scope</key><string>markup.inserted</string>
+      <key>settings</key><dict><key>foreground</key><string>#22A850</string></dict></dict>
+    <dict><key>scope</key><string>markup.deleted</string>
+      <key>settings</key><dict><key>foreground</key><string>#FF3311</string></dict></dict>
+  </array>
+</dict>
+</plist>

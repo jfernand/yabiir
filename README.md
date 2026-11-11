@@ -33,7 +33,7 @@ db.merge()?; // compact away old versions and deletes, whenever you want
 db.close()?;
 ```
 
-See [`examples/basic_usage.rs`](examples/basic_usage.rs) for the full API walked through end to end (`put`/`get`/
+See [`examples/basic_usage.rs`](crates/yabiir/examples/basic_usage.rs) for the full API walked through end to end (`put`/`get`/
 `delete`/`list_keys`/`fold`/`merge`/`close`/reopen), or run it directly:
 
 ```sh
@@ -103,7 +103,7 @@ opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
   files) in `tracing` spans. Without the feature, warnings still go to stderr via `eprintln!` — nothing is silently
   dropped either way.
 
-[`examples/bsky_firehose.rs`](examples/bsky_firehose.rs) wires up a `Metrics` implementation and renders it as a live
+[`examples/bsky_firehose.rs`](crates/yabiir/examples/bsky_firehose.rs) wires up a `Metrics` implementation and renders it as a live
 `ratatui` dashboard alongside its own application-level stats — a working example of both hooks together.
 
 ## Known limitations

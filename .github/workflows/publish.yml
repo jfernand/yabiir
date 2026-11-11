@@ -1,14 +1,14 @@
 name: Publish to crates.io
 
 # Triggered by pushing a tag like `v0.2.1` — the version after `v` must
-# match yabiir's Cargo.toml `version` exactly, checked below before
+# match crates/yabiir/Cargo.toml's `version` exactly, checked below before
 # publishing. Tag a release with `cargo xtask release` (see README.md),
 # which does exactly that plus the push, or manually:
 #   git tag v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="yabiir") | .version')
 #   git push origin <the tag just printed>
 #
 # `.packages[]` is filtered by name, not indexed by position — the
-# repo is a workspace (yabiir plus the unpublished `xtask` dev-tooling
+# repo is a virtual workspace (crates/yabiir plus the unpublished `xtask` dev-tooling
 # crate), and `cargo metadata`'s package order isn't guaranteed.
 on:
   push:

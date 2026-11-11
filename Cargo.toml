@@ -1,72 +1,18 @@
-[package]
-name = "yabiir"
-version = "0.5.0"
+# Virtual workspace: no package at the root. Each storage engine is its own
+# crate under `crates/`; `xtask` is a small unpublished dev-tooling crate
+# (`cargo xtask release`, see README.md).
+[workspace]
+members = ["crates/yabiir", "xtask"]
+resolver = "3"
+
+# Fields shared by every published crate; members opt in with
+# `field.workspace = true`.
+[workspace.package]
 edition = "2024"
-description = "Bitcask implementation in rust"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jfernand/yabiir"
-readme = "README.md"
-keywords = ["bitcask", "key-value", "storage-engine", "embedded-database"]
-categories = ["database-implementations", "filesystem"]
-# General Riak-ecosystem background reading, not specific to Bitcask itself
-# (unlike docs/papers/bitcask-intro.pdf, which the README links to directly)
-# — large and not needed to build or use this crate, so kept out of the
-# published package.
-exclude = [
-    "docs/papers/basho-relational-to-riak-whitepaper.pdf",
-    "docs/papers/dynamo-amazon-sosp2007.pdf",
-]
 
-# `yabiir` stays the workspace root package (unchanged layout — nothing
-# moved into a subdirectory); `xtask` is the only other member, a small
-# unpublished dev-tooling crate (`cargo xtask release`, see README.md).
-[workspace]
-members = ["xtask"]
-
-[dependencies]
-crc32fast = "1.5.1"
-clap = { version = "4.6.6", features = ["derive"] }
-fs2 = "0.4"
-ahash = "0.8"
-tracing = { version = "0.1.44", optional = true }
-
-[lib]
-
-[[bin]]
-name = "kv"
-path = "src/bin/kv.rs"
-
-[dev-dependencies]
-criterion = "0.8.2"
-proptest = "1"
-ratatui = "0.29"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "time"] }
-futures-util = "0.3.34"
-atrium-api = "0.25.8"
-rs-car = "0.5.0"
-serde_ipld_dagcbor = "0.7.0"
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
-chrono = "0.4.45"
-serde = { version = "1.0.229", features = ["derive"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
-crossterm = { version = "0.29.0", features = ["event-stream"] }
-
-[[bench]]
-name = "format"
-harness = false
-
-[[bench]]
-name = "keydir"
-harness = false
-
-[[bench]]
-name = "datafile"
-harness = false
-
-[[bench]]
-name = "merge"
-harness = false
-
+# Profiles only take effect in the workspace root manifest.
 [profile.release]
 opt-level = 3
 lto = true
@@ -78,6 +24,3 @@ codegen-units = 1
 [profile.profiling]
 inherits = "release"
 debug = true
-
-[features]
-tracing = ["dep:tracing"]

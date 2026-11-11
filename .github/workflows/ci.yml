@@ -32,7 +32,7 @@ jobs:
       # The optional `tracing` feature (structured logging/spans, see
       # docs/ROADMAP.md §4) changes what compiles — check it separately
       # from the default-features build above, not just once combined.
-      - run: cargo clippy --all-targets --features tracing -- -D warnings
+      - run: cargo clippy -p yabiir --all-targets --features tracing -- -D warnings
 
   test-tracing-feature:
     name: test (tracing feature)
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --features tracing
+      - run: cargo test -p yabiir --features tracing
 
   test:
     name: test (${{ matrix.os }})

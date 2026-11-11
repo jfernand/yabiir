@@ -11,7 +11,7 @@ use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use crate::api::{Bitcask, Options};
@@ -45,6 +45,17 @@ pub struct Engine {
     /// (even when `sync_on_put` is off) since it's cheap and keeps `append`
     /// simple; only ever touched when `sync_on_put` is set.
     group_commit: GroupCommit,
+    /// Held *shared* by `put` and `delete` from appending their entry until
+    /// the keydir reflects it, and *exclusively* by `merge` only while it
+    /// reads which file is active to choose its inputs. So when merge chooses,
+    /// every entry in a file older than the active one is already published,
+    /// and merge's liveness check against the keydir is correct for all of
+    /// them — without it, merge could drop an entry appended but not yet
+    /// published, and remove its file (a lost write, or a deleted key come
+    /// back after reopen). Writes never wait on each other through this
+    /// gate; they wait only for the instant merge holds it, which is as long
+    /// as the writes already in progress take to publish.
+    publish_gate: RwLock<()>,
     next_file_id: AtomicU32,
     /// Resolved once at `open()` time from `opts.metrics` — `NoopMetrics`
     /// when the caller didn't provide one, so every call site can just
@@ -154,6 +165,83 @@ impl Engine {
         )?)
     }
 
+    /// [`Bitcask::put`], with `between_append_and_publish` run after the entry
+    /// is appended and before the keydir points at it. Production passes a
+    /// no-op; tests run a `merge` there, the window in which a merge could
+    /// treat the not-yet-published entry as dead and remove its file.
+    fn put_with_hook(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        timestamp: u32,
+        between_append_and_publish: impl FnOnce(),
+    ) -> Result<()> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        self.require_write()?;
+        let start = Instant::now();
+
+        let _publishing = self
+            .publish_gate
+            .read()
+            .expect("Publish gate no longer safe (RW lock poisoned); exiting");
+        let encoded = format::encode_entry(key, value, false, timestamp);
+        let (file_id, value_pos) = self.append(&encoded)?;
+        between_append_and_publish();
+        self.keydir
+            .insert(
+                key,
+                KeydirEntry {
+                    file_id,
+                    value_size: value.len() as u32,
+                    value_pos,
+                    timestamp,
+                },
+            );
+        self.metrics
+            .record_put(start.elapsed());
+        Ok(())
+    }
+
+    /// [`Bitcask::delete`], with `between_append_and_publish` run after the
+    /// tombstone is appended and before the key leaves the keydir — the same
+    /// window as [`Engine::put_with_hook`].
+    fn delete_with_hook(
+        &self,
+        key: &[u8],
+        timestamp: u32,
+        between_append_and_publish: impl FnOnce(),
+    ) -> Result<()> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        self.require_write()?;
+        let start = Instant::now();
+
+        if self
+            .keydir
+            .get(key)
+            .is_none()
+        {
+            self.metrics
+                .record_delete(start.elapsed());
+            return Ok(()); // deleting a non-existent key is a no-op
+        }
+        let _publishing = self
+            .publish_gate
+            .read()
+            .expect("Publish gate no longer safe (RW lock poisoned); exiting");
+        let encoded = format::encode_entry(key, &[], true, timestamp);
+        self.append(&encoded)?;
+        between_append_and_publish();
+        self.keydir
+            .remove(key);
+        self.metrics
+            .record_delete(start.elapsed());
+        Ok(())
+    }
+
     /// [`Bitcask::get`], with `between_lookup_and_read` run after the keydir
     /// lookup and before the value is read. No lock is held between the two,
     /// so a concurrent `merge` can repoint the key and remove the file the
@@ -256,6 +344,7 @@ impl Engine {
             &self.keydir,
             &self.files,
             active_lock,
+            &self.publish_gate,
             &self.group_commit,
             &self.next_file_id,
             self.opts
@@ -322,6 +411,7 @@ impl Bitcask for Engine {
             keydir: SharedKeydir::new(keydir),
             active,
             group_commit: GroupCommit::new(),
+            publish_gate: RwLock::new(()),
             next_file_id: AtomicU32::new(next_id + 1),
             metrics,
             opts,
@@ -334,52 +424,11 @@ impl Bitcask for Engine {
     }
 
     fn put(&self, key: &[u8], value: &[u8], timestamp: u32) -> Result<()> {
-        if key.is_empty() {
-            return Err(Error::EmptyKey);
-        }
-        self.require_write()?;
-        let start = Instant::now();
-
-        let encoded = format::encode_entry(key, value, false, timestamp);
-        let (file_id, value_pos) = self.append(&encoded)?;
-        self.keydir
-            .insert(
-                key,
-                KeydirEntry {
-                    file_id,
-                    value_size: value.len() as u32,
-                    value_pos,
-                    timestamp,
-                },
-            );
-        self.metrics
-            .record_put(start.elapsed());
-        Ok(())
+        self.put_with_hook(key, value, timestamp, || {})
     }
 
     fn delete(&self, key: &[u8], timestamp: u32) -> Result<()> {
-        if key.is_empty() {
-            return Err(Error::EmptyKey);
-        }
-        self.require_write()?;
-        let start = Instant::now();
-
-        if self
-            .keydir
-            .get(key)
-            .is_none()
-        {
-            self.metrics
-                .record_delete(start.elapsed());
-            return Ok(()); // deleting a non-existent key is a no-op
-        }
-        let encoded = format::encode_entry(key, &[], true, timestamp);
-        self.append(&encoded)?;
-        self.keydir
-            .remove(key);
-        self.metrics
-            .record_delete(start.elapsed());
-        Ok(())
+        self.delete_with_hook(key, timestamp, || {})
     }
 
     fn list_keys(&self) -> Result<Vec<Vec<u8>>> {
@@ -407,6 +456,7 @@ impl Bitcask for Engine {
             &self.keydir,
             &self.files,
             active_lock,
+            &self.publish_gate,
             &self.group_commit,
             &self.next_file_id,
             self.opts
@@ -851,6 +901,85 @@ mod tests {
                 (b"K".to_vec(), b"v".to_vec()),
                 (b"other".to_vec(), b"x".to_vec()),
             ]
+        );
+    }
+
+    /// Runs `merge` on another thread from inside a write's
+    /// append-to-publish window, and gives it up to a second to finish
+    /// *inside* that window. Unfixed, merge completes there. Fixed, merge
+    /// must wait for the write to publish, so the wait times out and merge
+    /// finishes after the write returns. The verdict doesn't depend on
+    /// timing: a merge that can't finish inside the window can't cause the
+    /// race either.
+    fn merge_inside_window<'scope, 'env>(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        db: &'env Engine,
+    ) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            db.merge()
+                .unwrap();
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+    }
+
+    /// `put` appends `N` — which, with every put rotating, leaves `N` in a
+    /// file that is no longer active — and before it publishes `N`, a merge
+    /// runs. Unfixed, merge sees `N`'s entry as dead (the keydir doesn't
+    /// point at it yet), drops it and removes its file; `put` then publishes
+    /// a location in a file that no longer exists, and the write is lost.
+    #[test]
+    fn race_put_survives_merge_between_append_and_publish() {
+        let dir = TempDir::new();
+        let db = store_for_merge_race(&dir);
+
+        std::thread::scope(|scope| {
+            db.put_with_hook(b"N", b"new", now_unix(), || merge_inside_window(scope, &db))
+                .unwrap();
+        });
+
+        assert_eq!(
+            db.get(b"N")
+                .unwrap(),
+            Some(b"new".to_vec())
+        );
+        drop(db);
+        let reopened = open(&dir);
+        assert_eq!(
+            reopened
+                .get(b"N")
+                .unwrap(),
+            Some(b"new".to_vec())
+        );
+    }
+
+    /// The same window for `delete`. Unfixed, merge still sees `K`'s old
+    /// value as live (the keydir hasn't dropped it yet), copies it forward,
+    /// and removes the file holding the tombstone; after a reopen, `K` is
+    /// back.
+    #[test]
+    fn race_delete_survives_merge_between_append_and_publish() {
+        let dir = TempDir::new();
+        let db = store_for_merge_race(&dir);
+
+        std::thread::scope(|scope| {
+            db.delete_with_hook(b"K", now_unix(), || merge_inside_window(scope, &db))
+                .unwrap();
+        });
+
+        assert_eq!(
+            db.get(b"K")
+                .unwrap(),
+            None
+        );
+        drop(db);
+        let reopened = open(&dir);
+        assert_eq!(
+            reopened
+                .get(b"K")
+                .unwrap(),
+            None
         );
     }
 

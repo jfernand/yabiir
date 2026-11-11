@@ -76,8 +76,8 @@ use pending_queue::PendingQueue;
 use std::fs::{self, File};
 use std::io::{self};
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, RwLock};
 
 mod output_writer;
 mod pending_queue;
@@ -99,6 +99,7 @@ pub fn merge(
     keydir: &SharedKeydir,
     files: &DataFileSet,
     active: &Mutex<ActiveFile>,
+    publish_gate: &RwLock<()>,
     group_commit: &GroupCommit,
     next_file_id: &AtomicU32,
     max_file_size: u64,
@@ -109,6 +110,7 @@ pub fn merge(
         keydir,
         files,
         active,
+        publish_gate,
         group_commit,
         next_file_id,
         max_file_size,
@@ -134,13 +136,14 @@ pub(crate) fn merge_with_repoint_hook(
     keydir: &SharedKeydir,
     files: &DataFileSet,
     active: &Mutex<ActiveFile>,
+    publish_gate: &RwLock<()>,
     group_commit: &GroupCommit,
     next_file_id: &AtomicU32,
     max_file_size: u64,
     metrics: &dyn Metrics,
     mut before_repoint: impl FnMut(&[u8]),
 ) -> Result<()> {
-    let input_ids = collect_input_ids(dir, active)?;
+    let input_ids = collect_input_ids(dir, active, publish_gate)?;
     if input_ids.is_empty() {
         return Ok(()); // nothing to do
     }
@@ -334,16 +337,34 @@ fn copy_forward_live_file_entries(
     feature = "tracing",
     tracing::instrument(skip_all, name = "merge::scan")
 )]
-fn collect_input_ids(dir: &Path, active: &Mutex<ActiveFile>) -> io::Result<Vec<u32>> {
+fn collect_input_ids(
+    dir: &Path,
+    active: &Mutex<ActiveFile>,
+    publish_gate: &RwLock<()>,
+) -> io::Result<Vec<u32>> {
     // 1. Snapshot which files are eligible: everything except the current
     //    active file at the moment merge starts. Files created by rotation
     //    *during* the merge (concurrent puts are still allowed) are simply
     //    not included in this pass — they'll be picked up by the next
     //    merge. Safe and simple (plan §7.2 step 1).
-    let active_id_at_start = active
-        .lock()
-        .expect("Active file access no loner safe (mutex poisoned); exiting")
-        .file_id();
+    //
+    //    Read under the publish gate, held exclusively: that waits for every
+    //    put/delete that has appended but not yet updated the keydir. An
+    //    entry in a file below `active_id_at_start` was appended before that
+    //    file rotated out, so its write is one of those in progress, and once
+    //    the gate is ours the keydir reflects it. Without this, the liveness
+    //    check below would see a just-appended entry as dead. Writes that
+    //    start after the gate is released append to the active file or a
+    //    later one, which aren't inputs.
+    let active_id_at_start = {
+        let _no_writes_in_flight = publish_gate
+            .write()
+            .expect("Publish gate no longer safe (RW lock poisoned); exiting");
+        active
+            .lock()
+            .expect("Active file access no loner safe (mutex poisoned); exiting")
+            .file_id()
+    };
     let input_ids: Vec<u32> = DataFileSet::discover(dir)?
         .into_iter()
         .filter(|&id| id < active_id_at_start)

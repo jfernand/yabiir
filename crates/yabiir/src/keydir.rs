@@ -169,6 +169,19 @@ impl SharedKeydir {
             .cas_repoint(key, expected_old, new)
     }
 
+    /// Run `f` with the keydir under its read lock, and return what it
+    /// returns. For a reader that has to act on an entry while the entry is
+    /// still current — `Engine::get` and `Engine::fold` take the read handle
+    /// for an entry's file here, so merge can't remove the file first (see
+    /// `DataFileSet::handle`). `f` must not do disk I/O: the lock blocks
+    /// every writer while it runs (plan §8.2).
+    pub fn with_read<R>(&self, f: impl FnOnce(&Keydir) -> R) -> R {
+        f(&self
+            .0
+            .read()
+            .expect("Key directory data structure no longer safe (RW lock poisoned); exiting"))
+    }
+
     /// Point-in-time snapshot of every `(key, entry)` pair, for `fold` and
     /// `list_keys`. The read lock is held only long enough to clone the
     /// map's contents out, never across the disk I/O those callers do

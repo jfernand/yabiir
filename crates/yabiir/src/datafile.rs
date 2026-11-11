@@ -8,6 +8,7 @@
 //! headroom given each file is at minimum megabytes.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -23,10 +24,9 @@ pub struct ActiveFile {
     file_id: u32,
     writer: BufWriter<File>,
     /// A second handle onto the same file, opened once alongside the
-    /// writer (plan §3.3), used for positioned reads of keys that were
-    /// just written to this still-active file — reads of an active file
-    /// don't go through [`DataFileSet`], which only ever opens files that
-    /// have already rotated out and become immutable.
+    /// writer (plan §3.3), for positioned reads of this file. The engine's
+    /// reads go through [`DataFileSet`], which caches a `dup` of this handle
+    /// when the file is created (see [`DataFileSet::create_active`]).
     read_handle: File,
     offset: u64,
 }
@@ -155,13 +155,29 @@ impl ActiveFile {
     pub fn read_at(&self, pos: u64, len: u32) -> io::Result<Vec<u8>> {
         pread_exact(&self.read_handle, pos, len)
     }
+
+    /// Another handle onto this file (a `dup` of the descriptor, no path
+    /// lookup), for [`DataFileSet`]'s read-handle cache.
+    fn reader(&self) -> io::Result<File> {
+        self.read_handle
+            .try_clone()
+    }
 }
 
-/// Read-only access to every data file in a Bitcask directory, active file
-/// excluded (see [`ActiveFile::read_at`] for that). Read handles are opened
-/// lazily on first access and cached for the life of the `DataFileSet`
-/// (plan §3.3: never evict — a real Bitcask directory has at most a few
-/// thousand files even at scale, thanks to merge).
+/// Read access to every data file in a Bitcask directory, the active file
+/// included. One read handle per file is cached for the life of the
+/// `DataFileSet` (plan §3.3: never evict — a real Bitcask directory has at
+/// most a few thousand files even at scale, thanks to merge), except that
+/// merge [`forget`](Self::forget)s the files it removes.
+///
+/// A handle is cached *before* any keydir entry can point into its file:
+/// files that exist at open are [`register`](Self::register)ed then, and
+/// files created later — every new active file and every merge output file —
+/// are made with [`create_active`](Self::create_active), which caches the
+/// handle as it creates the file. So [`handle`](Self::handle) normally never
+/// opens anything, and readers can take a handle while holding the keydir
+/// lock without doing I/O under it. See [`handle`](Self::handle) for why
+/// readers take it there.
 pub struct DataFileSet {
     dir: PathBuf,
     readers: Mutex<HashMap<u32, Arc<File>>>,
@@ -195,6 +211,66 @@ impl DataFileSet {
         Ok(ids)
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Create (or resume) the active file `file_id` and cache a read handle
+    /// for it, before anything has been written to it — so no keydir entry
+    /// can ever point into a file this set has no handle for. Every
+    /// `ActiveFile` that will receive entries (the engine's active file and
+    /// merge's output files) is made through here.
+    pub fn create_active(&self, file_id: u32) -> io::Result<ActiveFile> {
+        let active = ActiveFile::create(&self.dir, file_id)?;
+        let reader = Arc::new(active.reader()?);
+        self.readers
+            .lock()
+            .expect("Data file access no longer safe (mutex poisoned); exiting")
+            .insert(file_id, reader);
+        Ok(active)
+    }
+
+    /// Open and cache read handles for `file_ids`, files that already exist
+    /// on disk — called once at open, before the keydir is shared, so a
+    /// recovered store's files are cached like every file created later.
+    pub fn register(&self, file_ids: &[u32]) -> io::Result<()> {
+        let mut readers = self
+            .readers
+            .lock()
+            .expect("Data file access no longer safe (mutex poisoned); exiting");
+        for &file_id in file_ids {
+            if let Entry::Vacant(slot) = readers.entry(file_id) {
+                slot.insert(Arc::new(File::open(Self::data_path(&self.dir, file_id))?));
+            }
+        }
+        Ok(())
+    }
+
+    /// The read handle for `file_id`.
+    ///
+    /// **Take it while the keydir entry pointing into `file_id` is still
+    /// current**, i.e. under the keydir's read lock (see `Engine::get`).
+    /// Merge removes a file only after repointing every key that pointed into
+    /// it, and repointing takes the keydir's write lock — so a handle taken
+    /// under the read lock is taken before its file can be removed. On unix
+    /// an open descriptor keeps a file's contents readable after `unlink`, so
+    /// the read that follows succeeds even if merge removes the file in
+    /// between. A file whose handle isn't cached (which the registration
+    /// rules above make an exception) is opened here, correctly but with that
+    /// `open` done under the caller's lock.
+    pub fn handle(&self, file_id: u32) -> io::Result<Arc<File>> {
+        let mut readers = self
+            .readers
+            .lock()
+            .expect("Data file access no longer safe (mutex poisoned); exiting");
+        if let Some(f) = readers.get(&file_id) {
+            return Ok(Arc::clone(f));
+        }
+        let f = Arc::new(File::open(Self::data_path(&self.dir, file_id))?);
+        readers.insert(file_id, Arc::clone(&f));
+        Ok(f)
+    }
+
     pub fn data_path(dir: &Path, file_id: u32) -> PathBuf {
         dir.join(format!("{file_id:020}.bitcask.data"))
     }
@@ -203,26 +279,14 @@ impl DataFileSet {
         dir.join(format!("{file_id:020}.bitcask.hint"))
     }
 
-    /// Read `len` bytes starting at `pos` from the (immutable) data file
-    /// `file_id`. The handle-cache lock is held only long enough to fetch
-    /// or insert the cached `Arc<File>` — never across the actual read, so
-    /// concurrent reads of the same or different files never serialize on
-    /// each other (plan §8.2).
+    /// Read `len` bytes starting at `pos` from data file `file_id`. The
+    /// handle-cache lock is held only long enough to fetch the cached
+    /// `Arc<File>` — never across the actual read, so concurrent reads of the
+    /// same or different files never serialize on each other (plan §8.2).
+    /// Not safe against a concurrent merge by itself — see
+    /// [`handle`](Self::handle); the engine's reads take the handle first.
     pub fn read_at(&self, file_id: u32, pos: u64, len: u32) -> io::Result<Vec<u8>> {
-        let file = {
-            let mut readers = self
-                .readers
-                .lock()
-                .expect("Data file access no loner safe (mutex poisoned); exiting");
-            if let Some(f) = readers.get(&file_id) {
-                Arc::clone(f)
-            } else {
-                let f = Arc::new(File::open(Self::data_path(&self.dir, file_id))?);
-                readers.insert(file_id, Arc::clone(&f));
-                f
-            }
-        };
-        pread_exact(&file, pos, len)
+        pread_exact(&*self.handle(file_id)?, pos, len)
     }
 
     /// Drop this set's cached read handle for `file_id`, if any. Called by
@@ -259,7 +323,7 @@ fn parse_data_file_id(name: &str) -> Option<u32> {
 /// `Seek` + `Read` on a handle shared across threads is a classic bug (plan
 /// §3.3).
 #[cfg(unix)]
-fn pread_exact(file: &File, pos: u64, len: u32) -> io::Result<Vec<u8>> {
+pub(crate) fn pread_exact(file: &File, pos: u64, len: u32) -> io::Result<Vec<u8>> {
     use std::os::unix::fs::FileExt;
     let mut buf = vec![0u8; len as usize];
     file.read_exact_at(&mut buf, pos)?;
@@ -505,6 +569,44 @@ mod tests {
             active.len(),
             "flush_only should make buffered bytes visible on disk"
         );
+    }
+
+    /// The rule `DataFileSet::handle` relies on: a file created through
+    /// `create_active`, or registered at open, has its handle cached before
+    /// anything points into it, so it stays readable through `handle` after
+    /// the file is unlinked — no `open` by path is ever needed.
+    #[test]
+    fn create_active_and_register_cache_handles_that_outlive_unlink() {
+        let dir = TempDir::new();
+        let encoded = format::encode_entry(b"k", b"v", false, 0);
+
+        // A file that already exists when the set is created (recovery's case).
+        let mut existing = ActiveFile::create(&dir, 1).unwrap();
+        let (_, existing_pos, _) = existing
+            .append(&encoded)
+            .unwrap();
+        drop(existing);
+
+        let files = DataFileSet::new(&*dir);
+        files
+            .register(&[1])
+            .unwrap();
+
+        // A file created through the set (rotation's and merge output's case).
+        let mut created = files
+            .create_active(2)
+            .unwrap();
+        let (_, created_pos, _) = created
+            .append(&encoded)
+            .unwrap();
+
+        for (file_id, pos) in [(1, existing_pos), (2, created_pos)] {
+            fs::remove_file(DataFileSet::data_path(&dir, file_id)).unwrap();
+            let file = files
+                .handle(file_id)
+                .unwrap();
+            assert_eq!(pread_exact(&file, pos, 1).unwrap(), b"v");
+        }
     }
 
     #[test]

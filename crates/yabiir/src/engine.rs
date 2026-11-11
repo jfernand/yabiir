@@ -6,6 +6,9 @@
 //! §7); `open` also acquires the process-level single-writer lock via
 //! [`crate::lock`] when `read_write` is set (plan §8.1).
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,7 +16,7 @@ use std::time::Instant;
 
 use crate::api::{Bitcask, Options};
 use crate::commit::GroupCommit;
-use crate::datafile::{ActiveFile, DataFileSet};
+use crate::datafile::{self, ActiveFile, DataFileSet};
 use crate::error::{Error, Result};
 use crate::format;
 use crate::keydir::{Keydir, KeydirEntry, SharedKeydir};
@@ -111,7 +114,9 @@ impl Engine {
                 let new_id = self
                     .next_file_id
                     .fetch_add(1, Ordering::SeqCst);
-                *active = ActiveFile::create(&self.dir, new_id)?;
+                *active = self
+                    .files
+                    .create_active(new_id)?;
             }
             (file_id, value_pos, target_gen)
         };
@@ -133,21 +138,94 @@ impl Engine {
         Ok((file_id, value_pos))
     }
 
-    /// Read the value bytes a keydir entry points at: value-only read (plan
-    /// §4.3 strategy (a)) — exactly `value_sz` bytes starting at
+    /// Read the value bytes `entry` points at through `file`, a handle taken
+    /// for `entry.file_id` while `entry` was current: value-only read (plan
+    /// §4.3 strategy (a)) — exactly `value_size` bytes starting at
     /// `value_pos`, no header re-read, no CRC re-verification on the read
-    /// path. Always goes through [`DataFileSet`], regardless of whether
-    /// `entry.file_id` happens to be *this* handle's current active file or
-    /// even *another* process's — `ActiveFile::append` always flushes
-    /// before returning, so a keydir entry is never published until its
-    /// bytes are already visible to a fresh, independent `File::open`.
-    /// That's what lets this skip the active-file lock entirely: no read
-    /// ever needs to touch it (plan §8.2's ideal of no lock at all during
-    /// an active-file read).
-    fn read_value(&self, entry: KeydirEntry) -> Result<Vec<u8>> {
-        Ok(self
-            .files
-            .read_at(entry.file_id, entry.value_pos, entry.value_size)?)
+    /// path. No lock is held: `ActiveFile::append` always flushes before
+    /// returning, so a keydir entry is never published until its bytes are
+    /// visible through any handle onto the file (plan §8.2's ideal of no
+    /// lock at all during a read).
+    fn read_value(file: &File, entry: KeydirEntry) -> Result<Vec<u8>> {
+        Ok(datafile::pread_exact(
+            file,
+            entry.value_pos,
+            entry.value_size,
+        )?)
+    }
+
+    /// [`Bitcask::get`], with `between_lookup_and_read` run after the keydir
+    /// lookup and before the value is read. No lock is held between the two,
+    /// so a concurrent `merge` can repoint the key and remove the file the
+    /// lookup returned; the read still succeeds because the lookup also takes
+    /// the file's read handle, under the keydir's read lock (see
+    /// `DataFileSet::handle`). Production passes a no-op; tests run a whole
+    /// `merge` there to hit that window deterministically.
+    fn get_with_hook(
+        &self,
+        key: &[u8],
+        between_lookup_and_read: impl FnOnce(KeydirEntry),
+    ) -> Result<Option<Vec<u8>>> {
+        let start = Instant::now();
+        let pinned = self
+            .keydir
+            .with_read(|keydir| {
+                keydir
+                    .get(key)
+                    .map(|entry| {
+                        self.files
+                            .handle(entry.file_id)
+                            .map(|file| (entry, file))
+                    })
+            });
+        let value = match pinned {
+            Some(pinned) => {
+                let (entry, file) = pinned?;
+                between_lookup_and_read(entry);
+                Some(Self::read_value(&file, entry)?)
+            }
+            None => None,
+        };
+        self.metrics
+            .record_get(start.elapsed());
+        Ok(value)
+    }
+
+    /// [`Bitcask::fold`], with `after_snapshot` run once the keydir snapshot
+    /// is taken and before any value is read — the same window as
+    /// [`Engine::get_with_hook`], held open for the whole fold. The snapshot
+    /// takes one read handle per file it points into, under the same read
+    /// lock, so a merge that removes those files while the fold runs doesn't
+    /// affect it; their disk space is freed when the fold drops the handles.
+    fn fold_with_hook<A>(
+        &self,
+        mut f: impl FnMut(&[u8], &[u8], A) -> A,
+        init: A,
+        after_snapshot: impl FnOnce(),
+    ) -> Result<A> {
+        let (snapshot, files) = self
+            .keydir
+            .with_read(|keydir| -> Result<_> {
+                let mut files: HashMap<u32, Arc<File>> = HashMap::new();
+                let mut snapshot = Vec::with_capacity(keydir.len());
+                for (key, entry) in keydir.iter() {
+                    if let Entry::Vacant(slot) = files.entry(entry.file_id) {
+                        slot.insert(
+                            self.files
+                                .handle(entry.file_id)?,
+                        );
+                    }
+                    snapshot.push((Box::<[u8]>::from(key), *entry));
+                }
+                Ok((snapshot, files))
+            })?;
+        after_snapshot();
+        let mut acc = init;
+        for (key, entry) in snapshot {
+            let value = Self::read_value(&files[&entry.file_id], entry)?;
+            acc = f(&key, &value, acc);
+        }
+        Ok(acc)
     }
 
     /// Test-only entry point into [`merge::merge_with_repoint_hook`], exposed here
@@ -222,8 +300,13 @@ impl Bitcask for Engine {
         // A read-only handle never appends, so it never opens a writable
         // active file at all (plan §6.1's `ActiveFile::none_for_read_only`)
         // — every read for it goes through `files` (see `read_value`).
+        // Every recovered file gets its read handle now, and the new active
+        // file gets one as it's created — so `files` holds a handle for every
+        // file a keydir entry can point into (see `DataFileSet::handle`).
+        let files = DataFileSet::new(&dir);
+        files.register(&file_ids)?;
         let active = if opts.is_read_write {
-            Some(Mutex::new(ActiveFile::create(&dir, next_id)?))
+            Some(Mutex::new(files.create_active(next_id)?))
         } else {
             None
         };
@@ -234,7 +317,7 @@ impl Bitcask for Engine {
             .unwrap_or_else(|| Arc::new(NoopMetrics));
 
         Ok(Self {
-            files: DataFileSet::new(&dir),
+            files,
             dir,
             keydir: SharedKeydir::new(keydir),
             active,
@@ -247,17 +330,7 @@ impl Bitcask for Engine {
     }
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let start = Instant::now();
-        let value = match self
-            .keydir
-            .get(key)
-        {
-            Some(entry) => Some(self.read_value(entry)?),
-            None => None,
-        };
-        self.metrics
-            .record_get(start.elapsed());
-        Ok(value)
+        self.get_with_hook(key, |_| {})
     }
 
     fn put(&self, key: &[u8], value: &[u8], timestamp: u32) -> Result<()> {
@@ -318,16 +391,8 @@ impl Bitcask for Engine {
             .collect())
     }
 
-    fn fold<A>(&self, mut f: impl FnMut(&[u8], &[u8], A) -> A, init: A) -> Result<A> {
-        let mut acc = init;
-        for (key, entry) in self
-            .keydir
-            .snapshot()
-        {
-            let value = self.read_value(entry)?;
-            acc = f(&key, &value, acc);
-        }
-        Ok(acc)
+    fn fold<A>(&self, f: impl FnMut(&[u8], &[u8], A) -> A, init: A) -> Result<A> {
+        self.fold_with_hook(f, init, || {})
     }
 
     fn merge(&self) -> Result<()> {
@@ -715,6 +780,80 @@ mod tests {
     /// paused; merge is then allowed to finish. The CAS-repoint must lose
     /// to the concurrent write, not silently resurrect the value merge was
     /// copying forward (see `merge.rs`'s §7.3 discussion).
+    /// A store whose every `put` rotates into its own file, holding `K` and
+    /// one other key, so `merge` has immutable input files to compact and
+    /// remove.
+    fn store_for_merge_race(dir: &Path) -> Engine {
+        let db = Engine::open(
+            dir,
+            Options {
+                max_file_size: 1, // every put rotates into its own file
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        db.put(b"K", b"v", now_unix())
+            .unwrap();
+        db.put(b"other", b"x", now_unix())
+            .unwrap();
+        db
+    }
+
+    /// `get` looks `K` up, then — before it reads the value — a whole `merge`
+    /// runs, repointing `K` and removing the file the lookup returned. This
+    /// is the interleaving behind the intermittent failures of
+    /// `merge::tests::stress_concurrent_put_delete_and_merge_match_reference_model`,
+    /// made deterministic.
+    #[test]
+    fn race_get_survives_merge_removing_its_file_between_lookup_and_read() {
+        let dir = TempDir::new();
+        let db = store_for_merge_race(&dir);
+
+        let value = db.get_with_hook(b"K", |entry| {
+            db.merge()
+                .unwrap();
+            // The precondition of the race, checked so the test can't pass
+            // vacuously: the file the lookup returned is gone.
+            assert!(
+                !DataFileSet::data_path(&dir, entry.file_id).exists(),
+                "merge should have removed file {}",
+                entry.file_id
+            );
+        });
+
+        assert_eq!(value.unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// The same race for `fold`: the snapshot is taken, then a whole `merge`
+    /// runs before any value is read.
+    #[test]
+    fn race_fold_survives_merge_removing_files_after_its_snapshot() {
+        let dir = TempDir::new();
+        let db = store_for_merge_race(&dir);
+
+        let rows = db.fold_with_hook(
+            |key, value, mut rows: Vec<(Vec<u8>, Vec<u8>)>| {
+                rows.push((key.to_vec(), value.to_vec()));
+                rows
+            },
+            Vec::new(),
+            || {
+                db.merge()
+                    .unwrap();
+            },
+        );
+
+        let mut rows = rows.unwrap();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                (b"K".to_vec(), b"v".to_vec()),
+                (b"other".to_vec(), b"x".to_vec()),
+            ]
+        );
+    }
+
     #[test]
     fn race_concurrent_put_during_merge_does_not_lose_the_write() {
         let dir = TempDir::new();

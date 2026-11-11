@@ -147,7 +147,7 @@ pub(crate) fn merge_with_repoint_hook(
 
     // 2. Iterate input files oldest -> newest, entry by entry, copying
     //    forward only the live ones.
-    let mut writer = MergeOutputWriter::new(dir, next_file_id, max_file_size)?;
+    let mut writer = MergeOutputWriter::new(files, next_file_id, max_file_size)?;
     let mut highest_output_id = writer.current_file_id();
     // Entries written but not yet repointed: write_live_entry batches its
     // flushes (see this module's doc comment), so a key's bytes may not be
@@ -173,7 +173,7 @@ pub(crate) fn merge_with_repoint_hook(
 
     remove_old_input_files(dir, files, &input_ids);
 
-    restore_active_file(dir, active, group_commit, next_file_id, highest_output_id)?;
+    restore_active_file(files, active, group_commit, next_file_id, highest_output_id)?;
 
     metrics.record_merge_summary(input_ids.len(), live_entries_copied);
 
@@ -204,7 +204,7 @@ fn finish_and_apply_pending_repoints(
 }
 
 fn restore_active_file(
-    dir: &Path,
+    files: &DataFileSet,
     active: &Mutex<ActiveFile>,
     group_commit: &GroupCommit,
     next_file_id: &AtomicU32,
@@ -224,7 +224,7 @@ fn restore_active_file(
             active_guard.sync()?;
             group_commit.mark_all_durable();
             let new_id = next_file_id.fetch_add(1, Ordering::SeqCst);
-            *active_guard = ActiveFile::create(dir, new_id)?;
+            *active_guard = files.create_active(new_id)?;
         }
     };
     Ok(())

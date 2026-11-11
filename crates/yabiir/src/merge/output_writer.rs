@@ -4,7 +4,6 @@ use crate::format::Entry;
 use std::fs::File;
 use std::io;
 use std::io::{BufWriter, Write};
-use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// How many live entries `MergeOutputWriter` writes before flushing, absent
@@ -19,7 +18,10 @@ const MERGE_FLUSH_BATCH_SIZE: usize = 256;
 /// batched to line up with this writer's own flush batches (plan §7.4 and
 /// this module's doc comment on batched flushing).
 pub struct MergeOutputWriter<'a> {
-    dir: &'a Path,
+    /// Output files are created through this, so each one's read handle is
+    /// cached before merge repoints any key into it (see
+    /// `DataFileSet::create_active`).
+    files: &'a DataFileSet,
     next_file_id: &'a AtomicU32,
     max_file_size: u64,
     current_data: ActiveFile,
@@ -37,13 +39,13 @@ pub struct MergeOutputWriter<'a> {
 
 impl<'a> MergeOutputWriter<'a> {
     pub(crate) fn new(
-        dir: &'a Path,
+        files: &'a DataFileSet,
         next_file_id: &'a AtomicU32,
         max_file_size: u64,
     ) -> io::Result<Self> {
-        let (current_data, current_hint) = Self::open_output(dir, next_file_id)?;
+        let (current_data, current_hint) = Self::open_output(files, next_file_id)?;
         Ok(Self {
-            dir,
+            files,
             next_file_id,
             max_file_size,
             current_data,
@@ -54,15 +56,15 @@ impl<'a> MergeOutputWriter<'a> {
     }
 
     fn open_output(
-        dir: &Path,
+        files: &DataFileSet,
         next_file_id: &AtomicU32,
     ) -> io::Result<(ActiveFile, BufWriter<File>)> {
         // Claims an id from the *same* counter the engine's write path uses
         // for active-file rotation, so merge-output ids never collide with
         // a concurrently-rotated active file.
         let file_id = next_file_id.fetch_add(1, Ordering::SeqCst);
-        let data = ActiveFile::create(dir, file_id)?;
-        let hint = BufWriter::new(File::create(DataFileSet::hint_path(dir, file_id))?);
+        let data = files.create_active(file_id)?;
+        let hint = BufWriter::new(File::create(DataFileSet::hint_path(files.dir(), file_id))?);
         Ok((data, hint))
     }
 
@@ -137,7 +139,7 @@ impl<'a> MergeOutputWriter<'a> {
         self.current_data
             .sync()?;
         self.close_current_hint_file()?;
-        let (data, hint) = Self::open_output(self.dir, self.next_file_id)?;
+        let (data, hint) = Self::open_output(self.files, self.next_file_id)?;
         self.current_data = data;
         self.current_hint = hint;
         self.hint_crc = crc32fast::Hasher::new();

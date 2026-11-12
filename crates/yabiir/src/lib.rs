@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // src/bin/e.rs) needs to open and use a Bitcask datastore, re-exported flat
 // at the crate root rather than requiring callers to know the internal
 // module layout.
-pub use api::{Bitcask, Options};
+pub use api::{Bitcask, KeyOrder, Options};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use metrics::Metrics;

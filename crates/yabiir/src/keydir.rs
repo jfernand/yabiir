@@ -2,10 +2,13 @@
 //! value on disk (the "keydir"). See `docs/bitcask-implementation-plan.md`
 //! §2.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, btree_map, hash_map};
+use std::ops::Bound;
 use std::sync::RwLock;
 
 use ahash::RandomState as AHashState;
+
+use crate::api::KeyOrder;
 
 /// Location of one key's newest value: which data file, and where in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +22,9 @@ pub struct KeydirEntry {
 }
 
 /// The keydir itself. Not thread-safe on its own — see [`SharedKeydir`] for
-/// the concurrent wrapper used at the engine level.
+/// the concurrent wrapper used at the engine level. Keeps its keys either in
+/// an aHash `HashMap` or in a `BTreeMap`, chosen at construction (see
+/// [`KeyOrder`]); the notes below are about the hashed one.
 ///
 /// Uses `aHash` instead of the default SipHash: profiling showed a real
 /// cost in `get`'s keydir lookup, and aHash is meaningfully cheaper while
@@ -41,57 +46,147 @@ pub struct KeydirEntry {
 /// adversarial/untrusted source, re-evaluate. The same per-instance
 /// randomization is also why this hasher can't be used as-is for
 /// deterministic simulation testing — see `docs/ROADMAP.md` §1.
-#[derive(Default)]
 pub struct Keydir {
-    map: HashMap<Box<[u8]>, KeydirEntry, AHashState>,
+    map: Map,
+}
+
+/// The two ways the keydir can keep its keys — see [`KeyOrder`]. Every
+/// operation is the same `match` on this, so the only cost of supporting both
+/// is one branch per call.
+enum Map {
+    Hashed(HashMap<Box<[u8]>, KeydirEntry, AHashState>),
+    Sorted(BTreeMap<Box<[u8]>, KeydirEntry>),
+}
+
+/// Iterator over a keydir's `(key, entry)` pairs: in no particular order for a
+/// hashed keydir, in key order for a sorted one.
+enum Iter<'a> {
+    Hashed(hash_map::Iter<'a, Box<[u8]>, KeydirEntry>),
+    Sorted(btree_map::Iter<'a, Box<[u8]>, KeydirEntry>),
+    Range(btree_map::Range<'a, Box<[u8]>, KeydirEntry>),
+    Empty,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = (&'a [u8], &'a KeydirEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (k, v) = match self {
+            Iter::Hashed(it) => it.next()?,
+            Iter::Sorted(it) => it.next()?,
+            Iter::Range(it) => it.next()?,
+            Iter::Empty => return None,
+        };
+        Some((k.as_ref(), v))
+    }
+}
+
+impl Default for Keydir {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Keydir {
+    /// A hashed keydir — see [`Keydir::with_order`].
     pub fn new() -> Self {
+        Self::with_order(KeyOrder::Hashed)
+    }
+
+    pub fn with_order(order: KeyOrder) -> Self {
         Self {
-            map: HashMap::default(),
+            map: match order {
+                KeyOrder::Hashed => Map::Hashed(HashMap::default()),
+                KeyOrder::Sorted => Map::Sorted(BTreeMap::new()),
+            },
+        }
+    }
+
+    pub fn order(&self) -> KeyOrder {
+        match self.map {
+            Map::Hashed(_) => KeyOrder::Hashed,
+            Map::Sorted(_) => KeyOrder::Sorted,
         }
     }
 
     pub fn get(&self, key: &[u8]) -> Option<KeydirEntry> {
-        self.map
-            .get(key)
-            .copied()
+        match &self.map {
+            Map::Hashed(m) => m.get(key),
+            Map::Sorted(m) => m.get(key),
+        }
+        .copied()
+    }
+
+    fn get_mut(&mut self, key: &[u8]) -> Option<&mut KeydirEntry> {
+        match &mut self.map {
+            Map::Hashed(m) => m.get_mut(key),
+            Map::Sorted(m) => m.get_mut(key),
+        }
     }
 
     /// Insert or overwrite `key`'s entry unconditionally — last write wins.
     pub fn insert(&mut self, key: &[u8], entry: KeydirEntry) {
-        match self
-            .map
-            .get_mut(key)
-        {
-            Some(slot) => *slot = entry,
-            None => {
-                self.map
-                    .insert(Box::from(key), entry);
-            }
+        if let Some(slot) = self.get_mut(key) {
+            *slot = entry;
+            return;
         }
+        match &mut self.map {
+            Map::Hashed(m) => m.insert(Box::from(key), entry),
+            Map::Sorted(m) => m.insert(Box::from(key), entry),
+        };
     }
 
     pub fn remove(&mut self, key: &[u8]) -> Option<KeydirEntry> {
-        self.map
-            .remove(key)
+        match &mut self.map {
+            Map::Hashed(m) => m.remove(key),
+            Map::Sorted(m) => m.remove(key),
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.map
-            .len()
+        match &self.map {
+            Map::Hashed(m) => m.len(),
+            Map::Sorted(m) => m.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map
-            .is_empty()
+        self.len() == 0
     }
 
+    /// Every `(key, entry)` pair: in key order for a sorted keydir, in no
+    /// particular order for a hashed one.
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &KeydirEntry)> {
-        self.map
-            .iter()
-            .map(|(k, v)| (k.as_ref(), v))
+        match &self.map {
+            Map::Hashed(m) => Iter::Hashed(m.iter()),
+            Map::Sorted(m) => Iter::Sorted(m.iter()),
+        }
+    }
+
+    /// The `(key, entry)` pairs whose keys lie between `start` and `end`, in
+    /// key order — or `None` for a hashed keydir, which can't answer a range
+    /// without visiting every key. Bounds that describe no keys at all (start
+    /// after end, or equal with either side excluded) give an empty range
+    /// rather than a panic.
+    pub fn range(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Option<impl Iterator<Item = (&[u8], &KeydirEntry)>> {
+        let Map::Sorted(m) = &self.map else {
+            return None;
+        };
+        let empty = match (start, end) {
+            (Bound::Included(s), Bound::Included(e)) => s > e,
+            (Bound::Included(s) | Bound::Excluded(s), Bound::Excluded(e))
+            | (Bound::Excluded(s), Bound::Included(e)) => s >= e,
+            _ => false,
+        };
+        Some(if empty {
+            Iter::Empty
+        } else {
+            Iter::Range(m.range::<[u8], _>((start, end)))
+        })
     }
 
     /// Compare-and-repoint, used by merge (plan §7.3): only overwrite
@@ -101,10 +196,7 @@ impl Keydir {
     /// repoint happened; on `false`, merge's freshly-written copy is simply
     /// left unreferenced (harmless — cleaned up by the next merge pass).
     pub fn cas_repoint(&mut self, key: &[u8], expected_old: KeydirEntry, new: KeydirEntry) -> bool {
-        match self
-            .map
-            .get_mut(key)
-        {
+        match self.get_mut(key) {
             Some(slot) if *slot == expected_old => {
                 *slot = new;
                 true
@@ -211,6 +303,114 @@ mod tests {
             value_pos: n as u64,
             timestamp: n,
         }
+    }
+
+    fn sorted_with(keys: &[&str]) -> Keydir {
+        let mut kd = Keydir::with_order(KeyOrder::Sorted);
+        for (i, k) in keys
+            .iter()
+            .enumerate()
+        {
+            kd.insert(k.as_bytes(), entry(i as u32));
+        }
+        kd
+    }
+
+    fn keys_of<'a>(it: impl Iterator<Item = (&'a [u8], &'a KeydirEntry)>) -> Vec<&'a [u8]> {
+        it.map(|(k, _)| k)
+            .collect()
+    }
+
+    #[test]
+    fn both_orders_agree_on_every_point_operation() {
+        for order in [KeyOrder::Hashed, KeyOrder::Sorted] {
+            let mut kd = Keydir::with_order(order);
+            assert_eq!(kd.order(), order);
+            kd.insert(b"a", entry(1));
+            kd.insert(b"b", entry(2));
+            kd.insert(b"a", entry(3)); // overwrite
+            assert_eq!(kd.get(b"a"), Some(entry(3)), "{order:?}");
+            assert_eq!(kd.len(), 2, "{order:?}");
+            assert!(!kd.cas_repoint(b"a", entry(1), entry(9)), "{order:?}");
+            assert!(kd.cas_repoint(b"a", entry(3), entry(9)), "{order:?}");
+            assert_eq!(kd.get(b"a"), Some(entry(9)), "{order:?}");
+            assert_eq!(kd.remove(b"b"), Some(entry(2)), "{order:?}");
+            assert_eq!(kd.get(b"b"), None, "{order:?}");
+            assert_eq!(kd.len(), 1, "{order:?}");
+        }
+    }
+
+    #[test]
+    fn a_sorted_keydir_iterates_in_key_order() {
+        let kd = sorted_with(&["c64", "apple-ii", "zx-spectrum", "bbc-micro", "ibm-pc"]);
+        assert_eq!(
+            keys_of(kd.iter()),
+            vec![
+                &b"apple-ii"[..],
+                b"bbc-micro",
+                b"c64",
+                b"ibm-pc",
+                b"zx-spectrum"
+            ]
+        );
+    }
+
+    #[test]
+    fn range_honours_each_kind_of_bound_in_key_order() {
+        let kd = sorted_with(&["a", "b", "c", "d", "e"]);
+        let r = |s: Bound<&[u8]>, e: Bound<&[u8]>| {
+            keys_of(
+                kd.range(s, e)
+                    .unwrap(),
+            )
+        };
+        use Bound::{Excluded, Included, Unbounded};
+        assert_eq!(
+            r(Included(b"b"), Included(b"d")),
+            vec![&b"b"[..], b"c", b"d"]
+        );
+        assert_eq!(r(Included(b"b"), Excluded(b"d")), vec![&b"b"[..], b"c"]);
+        assert_eq!(r(Excluded(b"b"), Included(b"d")), vec![&b"c"[..], b"d"]);
+        assert_eq!(r(Unbounded, Excluded(b"c")), vec![&b"a"[..], b"b"]);
+        assert_eq!(r(Included(b"d"), Unbounded), vec![&b"d"[..], b"e"]);
+        // Bounds between stored keys still select the keys between them.
+        assert_eq!(r(Included(b"bb"), Included(b"dd")), vec![&b"c"[..], b"d"]);
+    }
+
+    #[test]
+    fn range_with_bounds_that_select_nothing_is_empty_rather_than_a_panic() {
+        // BTreeMap::range itself panics on these.
+        let kd = sorted_with(&["a", "b", "c"]);
+        use Bound::{Excluded, Included};
+        for (s, e) in [
+            (Included(&b"c"[..]), Included(&b"a"[..])),
+            (Excluded(&b"b"[..]), Excluded(&b"b"[..])),
+            (Included(&b"b"[..]), Excluded(&b"b"[..])),
+            (Excluded(&b"b"[..]), Included(&b"b"[..])),
+        ] {
+            assert_eq!(
+                kd.range(s, e)
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+        assert_eq!(
+            kd.range(Included(b"b"), Included(b"b"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_hashed_keydir_has_no_range() {
+        let mut kd = Keydir::new();
+        kd.insert(b"a", entry(1));
+        assert!(
+            kd.range(Bound::Unbounded, Bound::Unbounded)
+                .is_none()
+        );
     }
 
     #[test]

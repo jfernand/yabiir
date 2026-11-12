@@ -1,6 +1,7 @@
 //! Property-based model test (`docs/bitcask-implementation-plan.md` §10):
 //! random sequences of put/delete/get/reopen/merge, checked against a plain
-//! `HashMap` reference model. The highest-leverage test in the whole plan
+//! `BTreeMap` reference model — with a hashed keydir, a sorted one, and one
+//! switching order at every reopen; for a sorted keydir, key order too. The highest-leverage test in the whole plan
 //! for a storage engine like this — real bugs in a log-structured store
 //! tend to show up only after specific *interleavings* of writes, deletes,
 //! reopens and merges that a hand-written test case is unlikely to think
@@ -9,14 +10,15 @@
 //! Black-box: only the public `yabiir` API is used, exactly as any real
 //! caller would use it.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use proptest::prelude::*;
-use yabiir::{Bitcask, Engine, Options, now_unix};
+use yabiir::{Bitcask, Engine, KeyOrder, Options, now_unix};
 
 /// Minimal self-cleaning temp directory — same pattern used throughout this
 /// crate's own tests and benches.
@@ -87,17 +89,31 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 /// Small `max_file_size` so a typical op sequence actually exercises
 /// rotation (and gives merge non-trivial input) instead of everything
 /// landing in one never-rotated active file.
-fn small_file_options() -> Options {
+fn small_file_options(key_order: KeyOrder) -> Options {
     Options {
         max_file_size: 200,
+        key_order,
         ..Options::default()
     }
 }
 
-fn run_model(ops: Vec<Op>) {
+/// How the store is opened across the run: always one order, or switching
+/// order at every reopen (nothing about the order is on disk, so a store must
+/// open correctly either way).
+#[derive(Clone, Copy, Debug)]
+enum Orders {
+    Always(KeyOrder),
+    Alternating,
+}
+
+fn run_model(ops: Vec<Op>, orders: Orders) {
     let dir = TempDir::new();
-    let mut model: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-    let mut db = Engine::open(&*dir, small_file_options()).unwrap();
+    let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+    let mut order = match orders {
+        Orders::Always(o) => o,
+        Orders::Alternating => KeyOrder::Hashed,
+    };
+    let mut db = Engine::open(&*dir, small_file_options(order)).unwrap();
 
     for op in ops {
         match op {
@@ -122,7 +138,13 @@ fn run_model(ops: Vec<Op>) {
             }
             Op::Reopen => {
                 drop(db);
-                db = Engine::open(&*dir, small_file_options()).unwrap();
+                if let Orders::Alternating = orders {
+                    order = match order {
+                        KeyOrder::Hashed => KeyOrder::Sorted,
+                        KeyOrder::Sorted => KeyOrder::Hashed,
+                    };
+                }
+                db = Engine::open(&*dir, small_file_options(order)).unwrap();
             }
             Op::Merge => {
                 db.merge()
@@ -136,12 +158,24 @@ fn run_model(ops: Vec<Op>) {
     let mut keys: Vec<_> = db
         .list_keys()
         .unwrap();
-    keys.sort();
-    let mut model_keys: Vec<_> = model
+    let model_keys: Vec<_> = model
         .keys()
         .cloned()
         .collect();
-    model_keys.sort();
+    if order == KeyOrder::Sorted {
+        // A sorted keydir lists keys in order, and scans them with values.
+        assert_eq!(keys, model_keys);
+        let all: Vec<(Vec<u8>, Vec<u8>)> = model
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(
+            db.scan(Bound::Unbounded, Bound::Unbounded)
+                .unwrap(),
+            all
+        );
+    }
+    keys.sort();
     assert_eq!(keys, model_keys);
     for k in &keys {
         assert_eq!(
@@ -158,6 +192,16 @@ proptest! {
 
     #[test]
     fn model_matches_reference(ops in prop::collection::vec(op_strategy(), 1..40)) {
-        run_model(ops);
+        run_model(ops, Orders::Always(KeyOrder::Hashed));
+    }
+
+    #[test]
+    fn model_matches_reference_with_a_sorted_keydir(ops in prop::collection::vec(op_strategy(), 1..40)) {
+        run_model(ops, Orders::Always(KeyOrder::Sorted));
+    }
+
+    #[test]
+    fn model_matches_reference_switching_order_at_every_reopen(ops in prop::collection::vec(op_strategy(), 1..40)) {
+        run_model(ops, Orders::Alternating);
     }
 }

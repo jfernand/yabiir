@@ -46,6 +46,10 @@ name = "keydir"
 harness = false
 
 [[bench]]
+name = "keydir_order"
+harness = false
+
+[[bench]]
 name = "datafile"
 harness = false
 

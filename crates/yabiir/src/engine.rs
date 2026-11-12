@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fs::File;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -24,6 +25,10 @@ use crate::lock::DirLock;
 use crate::merge;
 use crate::metrics::{Metrics, NoopMetrics};
 use crate::recovery;
+
+/// Keydir entries copied out under the keydir's read lock, with one read
+/// handle per data file they point into — see `Engine::pin`.
+type Pinned = (Vec<(Box<[u8]>, KeydirEntry)>, HashMap<u32, Arc<File>>);
 
 /// Concrete single-process Bitcask engine. See the module docs above for
 /// what's implemented so far.
@@ -279,6 +284,53 @@ impl Engine {
         Ok(value)
     }
 
+    /// Copy `entries` out of the keydir together with one read handle per file
+    /// they point into. Called under the keydir's read lock (from `fold` and
+    /// `scan`), so each handle is taken while its entries are current and a
+    /// merge can't remove the file before the values are read (see
+    /// `DataFileSet::handle`). No disk I/O: every handle is already cached.
+    fn pin<'k>(
+        &self,
+        entries: impl Iterator<Item = (&'k [u8], &'k KeydirEntry)>,
+    ) -> Result<Pinned> {
+        let mut files: HashMap<u32, Arc<File>> = HashMap::new();
+        let mut pinned = Vec::new();
+        for (key, entry) in entries {
+            if let Entry::Vacant(slot) = files.entry(entry.file_id) {
+                slot.insert(
+                    self.files
+                        .handle(entry.file_id)?,
+                );
+            }
+            pinned.push((Box::<[u8]>::from(key), *entry));
+        }
+        Ok((pinned, files))
+    }
+
+    /// Every live `(key, value)` pair whose key lies between `start` and
+    /// `end`, in key order: one descent into the keydir and a walk, instead
+    /// of a `fold` over every key. Needs a sorted keydir — a store opened with
+    /// [`KeyOrder::Sorted`](crate::KeyOrder::Sorted); on a hashed one it
+    /// returns [`Error::Unordered`]. Like `fold`, it reads a point-in-time
+    /// snapshot of the keys in range, safe against a concurrent merge.
+    pub fn scan(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let (pinned, files) = self
+            .keydir
+            .with_read(|keydir| {
+                keydir
+                    .range(start, end)
+                    .map(|range| self.pin(range))
+                    .ok_or(Error::Unordered)
+            })??;
+        pinned
+            .into_iter()
+            .map(|(key, entry)| {
+                let value = Self::read_value(&files[&entry.file_id], entry)?;
+                Ok((key.into_vec(), value))
+            })
+            .collect()
+    }
+
     /// [`Bitcask::fold`], with `after_snapshot` run once the keydir snapshot
     /// is taken and before any value is read — the same window as
     /// [`Engine::get_with_hook`], held open for the whole fold. The snapshot
@@ -293,20 +345,7 @@ impl Engine {
     ) -> Result<A> {
         let (snapshot, files) = self
             .keydir
-            .with_read(|keydir| -> Result<_> {
-                let mut files: HashMap<u32, Arc<File>> = HashMap::new();
-                let mut snapshot = Vec::with_capacity(keydir.len());
-                for (key, entry) in keydir.iter() {
-                    if let Entry::Vacant(slot) = files.entry(entry.file_id) {
-                        slot.insert(
-                            self.files
-                                .handle(entry.file_id)?,
-                        );
-                    }
-                    snapshot.push((Box::<[u8]>::from(key), *entry));
-                }
-                Ok((snapshot, files))
-            })?;
+            .with_read(|keydir| self.pin(keydir.iter()))?;
         after_snapshot();
         let mut acc = init;
         for (key, entry) in snapshot {
@@ -375,7 +414,7 @@ impl Bitcask for Engine {
         };
 
         let file_ids = DataFileSet::discover(&dir)?;
-        let mut keydir = Keydir::new();
+        let mut keydir = Keydir::with_order(opts.key_order);
         recovery::recover(&dir, &file_ids, &mut keydir)?;
 
         // next_file_id starts above whatever's already on disk (plan
@@ -830,6 +869,121 @@ mod tests {
     /// paused; merge is then allowed to finish. The CAS-repoint must lose
     /// to the concurrent write, not silently resurrect the value merge was
     /// copying forward (see `merge.rs`'s §7.3 discussion).
+    fn sorted_options() -> Options {
+        Options {
+            key_order: crate::KeyOrder::Sorted,
+            ..Options::default()
+        }
+    }
+
+    fn computers(db: &Engine) {
+        for (k, v) in [
+            ("c64", "1982"),
+            ("apple-ii", "1977"),
+            ("zx-spectrum", "1982"),
+            ("bbc-micro", "1981"),
+            ("ibm-pc", "1981"),
+        ] {
+            db.put(k.as_bytes(), v.as_bytes(), now_unix())
+                .unwrap();
+        }
+    }
+
+    fn keys_of(rows: &[(Vec<u8>, Vec<u8>)]) -> Vec<&str> {
+        rows.iter()
+            .map(|(k, _)| std::str::from_utf8(k).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn scan_returns_the_keys_in_range_in_order_with_their_values() {
+        let dir = TempDir::new();
+        let db = Engine::open(
+            &*dir,
+            Options {
+                max_file_size: 1, // every put in its own file
+                ..sorted_options()
+            },
+        )
+        .unwrap();
+        computers(&db);
+
+        let rows = db
+            .scan(Bound::Included(b"b"), Bound::Excluded(b"j"))
+            .unwrap();
+        assert_eq!(keys_of(&rows), vec!["bbc-micro", "c64", "ibm-pc"]);
+        assert_eq!(rows[1].1, b"1982");
+
+        // After a merge has moved every value into new files, the same answer.
+        db.merge()
+            .unwrap();
+        assert_eq!(
+            db.scan(Bound::Included(b"b"), Bound::Excluded(b"j"))
+                .unwrap(),
+            rows
+        );
+        // And list_keys follows the keydir's order too.
+        assert_eq!(
+            db.list_keys()
+                .unwrap(),
+            vec![
+                b"apple-ii".to_vec(),
+                b"bbc-micro".to_vec(),
+                b"c64".to_vec(),
+                b"ibm-pc".to_vec(),
+                b"zx-spectrum".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_on_a_hashed_store_is_an_unordered_error() {
+        let dir = TempDir::new();
+        let db = open(&dir); // Options::default(): KeyOrder::Hashed
+        computers(&db);
+        assert!(matches!(
+            db.scan(Bound::Unbounded, Bound::Unbounded),
+            Err(Error::Unordered)
+        ));
+    }
+
+    #[test]
+    fn the_same_store_opens_with_either_order() {
+        let dir = TempDir::new();
+        let hashed = open(&dir);
+        computers(&hashed);
+        drop(hashed);
+
+        let sorted = Engine::open(&*dir, sorted_options()).unwrap();
+        assert_eq!(
+            keys_of(
+                &sorted
+                    .scan(Bound::Unbounded, Bound::Unbounded)
+                    .unwrap()
+            ),
+            vec!["apple-ii", "bbc-micro", "c64", "ibm-pc", "zx-spectrum"]
+        );
+        sorted
+            .put(b"amiga", b"1985", now_unix())
+            .unwrap();
+        drop(sorted);
+
+        let hashed = open(&dir);
+        assert_eq!(
+            hashed
+                .get(b"amiga")
+                .unwrap(),
+            Some(b"1985".to_vec())
+        );
+        assert_eq!(
+            hashed
+                .list_keys()
+                .unwrap()
+                .len(),
+            6
+        );
+    }
+
     /// A store whose every `put` rotates into its own file, holding `K` and
     /// one other key, so `merge` has immutable input files to compact and
     /// remove.

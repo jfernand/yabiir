@@ -15,6 +15,10 @@ Sheehy & Smith's 2010 paper (included locally at [`docs/papers/bitcask-intro.pdf
 - Crash recovery on `open` — full-scan or hint-file-based, whichever's available
 - `merge` (compaction): reclaims space from superseded values and deleted keys, safe to run concurrently with live
   traffic
+- A choice of keydir per open, `Options::key_order`: `KeyOrder::Hashed` (the default, fastest point lookups) or
+  `KeyOrder::Sorted`, which adds `Engine::scan(start, end)` for ranges of keys in order and makes `fold`/`list_keys`
+  return keys in order. Nothing about it is stored on disk, so a store opens either way. `benches/keydir_order.rs`
+  measures what the order costs
 - A process-level single-writer lock, so two writable (`is_read_write: true`) handles can't corrupt the same directory
 - A small CLI (`kv`) and a synthetic load generator (`loadtest`) for exercising it
 - Optional observability: `put`/`get`/`delete`/`merge`/`sync` call durations via `Options::metrics`, and structured

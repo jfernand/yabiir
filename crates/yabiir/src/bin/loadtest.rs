@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use yabiir::{Bitcask, Engine, Options, now_unix};
+use yabiir::{Bitcask, Engine, KeyOrder, Options, now_unix};
 
 #[derive(Parser)]
 #[command(
@@ -73,6 +73,10 @@ struct Args {
 
     #[arg(long)]
     sync_on_put: bool,
+
+    /// Keep the keydir sorted (a `BTreeMap`) instead of hashed.
+    #[arg(long)]
+    sorted_keydir: bool,
 
     /// Run merge() in a dedicated background thread every N seconds.
     /// Omit to disable merge entirely.
@@ -250,6 +254,11 @@ fn main() {
             Options {
                 max_file_size: args.max_file_size,
                 should_sync_on_put: args.sync_on_put,
+                key_order: if args.sorted_keydir {
+                    KeyOrder::Sorted
+                } else {
+                    KeyOrder::Hashed
+                },
                 ..Options::default()
             },
         )

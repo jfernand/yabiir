@@ -20,6 +20,9 @@ pub enum Error {
     /// (`docs/bitcask-implementation-plan.md`) that this milestone's
     /// implementation doesn't provide yet — e.g. `merge` before §7 lands.
     NotImplemented(&'static str),
+    /// A range of keys (`Engine::scan`) was asked of a store whose keydir
+    /// keeps no order — opened with `key_order: KeyOrder::Hashed`.
+    Unordered,
 }
 
 impl fmt::Display for Error {
@@ -33,6 +36,10 @@ impl fmt::Display for Error {
             Error::Corrupt(msg) => write!(f, "data file corrupt: {msg}"),
             Error::ReadOnly => write!(f, "datastore is not open for writing (read-only handle)"),
             Error::NotImplemented(what) => write!(f, "not implemented yet: {what}"),
+            Error::Unordered => write!(
+                f,
+                "a range of keys needs a sorted keydir: open with key_order: KeyOrder::Sorted"
+            ),
         }
     }
 }
@@ -60,13 +67,14 @@ mod tests {
 
     #[test]
     fn display_produces_a_nonempty_message_naming_the_variant() {
-        let cases: [(Error, &str); 6] = [
+        let cases: [(Error, &str); 7] = [
             (Error::Io(std::io::Error::other("boom")), "boom"),
             (Error::AlreadyLocked, "locked"),
             (Error::EmptyKey, "empty"),
             (Error::Corrupt("bad crc".to_string()), "bad crc"),
             (Error::ReadOnly, "read-only"),
             (Error::NotImplemented("merge"), "merge"),
+            (Error::Unordered, "sorted keydir"),
         ];
         for (err, needle) in cases {
             let msg = err.to_string();

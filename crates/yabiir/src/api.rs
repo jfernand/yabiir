@@ -7,6 +7,23 @@ use crate::metrics::Metrics;
 
 /// Tuning/mode knobs for opening a [`Bitcask`] datastore.
 ///
+/// How the keydir — the in-memory index from each key to its newest value —
+/// keeps its keys. Chosen per open: nothing about it is stored on disk, so the
+/// same store can be opened either way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KeyOrder {
+    /// An aHash `HashMap`: the fastest point lookups (`get`, `put`, `delete`),
+    /// keys in no particular order, and no [`crate::Engine::scan`].
+    #[default]
+    Hashed,
+    /// A `BTreeMap`: keys in byte order, so [`crate::Engine::scan`] answers a
+    /// range of keys with one descent and a walk, and `fold` / `list_keys`
+    /// return keys in order. Point lookups compare whole keys on the way down,
+    /// so they cost more than with [`KeyOrder::Hashed`] (`benches/keydir_order.rs`
+    /// measures by how much), and so does rebuilding the keydir at open.
+    Sorted,
+}
+
 /// See `docs/bitcask-implementation-plan.md` §9 for the rationale behind
 /// each field.
 #[derive(Clone)]
@@ -23,6 +40,9 @@ pub struct Options {
     /// Observe `put`/`get`/`delete`/`merge`/`sync` call durations — `None`
     /// (the default) records nothing. See [`Metrics`].
     pub metrics: Option<Arc<dyn Metrics>>,
+    /// How the keydir keeps its keys — see [`KeyOrder`]. Defaults to
+    /// [`KeyOrder::Hashed`].
+    pub key_order: KeyOrder,
 }
 
 impl Options {
@@ -41,6 +61,7 @@ impl Default for Options {
             should_sync_on_put: false,
             max_file_size: 64 * 1024 * 1024,
             metrics: None,
+            key_order: KeyOrder::Hashed,
         }
     }
 }
@@ -54,6 +75,7 @@ impl fmt::Debug for Options {
             .field("is_read_write", &self.is_read_write)
             .field("should_sync_on_put", &self.should_sync_on_put)
             .field("max_file_size", &self.max_file_size)
+            .field("key_order", &self.key_order)
             .field(
                 "metrics",
                 &self

@@ -36,8 +36,8 @@ Open decisions are marked **Decision:**.
 - **The step:** the first condition that drops rows, and the obvious one: `SELECT * WHERE key =
   'zx-spectrum'`. (σ<sub>true</sub> is already in Chapter 0.)
 - **yabiir needs:** `get`. σ<sub>key = k</sub> is one keydir lookup instead of a fold over everything.
-- **Old material:** most of the current Chapter 1 (the keydir, the entry format) belongs here: it's
-  the answer to "how does `get` find one record?"
+- **Status:** Chapter 1, *Selection by Key*, done (2026-11-11). It absorbed the old keydir chapter:
+  the entry format, the keydir and hash indexes, plus both translations measured on a million rows.
 
 ### 3. σ — Restriction, on ranges of the key
 

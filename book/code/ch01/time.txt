@@ -1,0 +1,18 @@
+--- run 1
+rows in the store:       1000000
+scan (fold), median:     613.904455ms  (1000000 rows visited)
+get, median:             981ns
+get, p99:                1.557µs
+scan / get (medians):    625795x
+--- run 2
+rows in the store:       1000000
+scan (fold), median:     623.052538ms  (1000000 rows visited)
+get, median:             1.122µs
+get, p99:                1.852µs
+scan / get (medians):    555305x
+--- run 3
+rows in the store:       1000000
+scan (fold), median:     612.138257ms  (1000000 rows visited)
+get, median:             976ns
+get, p99:                1.473µs
+scan / get (medians):    627191x

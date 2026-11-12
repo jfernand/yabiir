@@ -1,0 +1,23 @@
+$ select-where DIR zx-spectrum --scan
+ key         | value
+-------------+-------
+ zx-spectrum | 1982
+(1 row)
+rows visited: 5
+$ select-where DIR zx-spectrum --get
+ key         | value
+-------------+-------
+ zx-spectrum | 1982
+(1 row)
+$ select-where DIR amiga --scan
+ key | value
+-----+-------
+(0 rows)
+rows visited: 5
+$ select-where DIR amiga --get
+ key | value
+-----+-------
+(0 rows)
+$ xxd 00000000000000000003.bitcask.data  # 31 bytes
+00000000: 8d0e 1935 4cf9 f46a 0b00 0000 0400 0000  ...5L..j........
+00000010: 7a78 2d73 7065 6374 7275 6d31 3938 32    zx-spectrum1982

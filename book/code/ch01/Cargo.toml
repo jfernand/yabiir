@@ -1,0 +1,11 @@
+[package]
+name = "select-where"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not a member of the yabiir workspace: book programs build on their own.
+[workspace]
+
+[dependencies]
+yabiir = { path = "../../../crates/yabiir" }

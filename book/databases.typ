@@ -20,7 +20,7 @@
 // ── Part I — Finding Things ─────────────────────────────────────────────
 #part("Finding Things", label: <part-finding>, blurb: [What `SELECT *` needs from a store, what an index is, what a hash index can and cannot answer, what keeping keys in order buys, and why a secondary index is one more table.])
 #include "chapters/00-select-star.typ"
-#include "chapters/01-the-keydir.typ"
+#include "chapters/01-selection-by-key.typ"
 #include "chapters/02-sorted-indexes.typ"
 #include "chapters/03-secondary-indexes.typ"
 

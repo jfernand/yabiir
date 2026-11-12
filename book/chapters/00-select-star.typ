@@ -163,7 +163,7 @@ result without `ORDER BY` @iso9075, so either order is a correct answer. The ord
 property of one open store, and a program that depends on it breaks the next time the store is opened.
 
 That's `SELECT *`: a selection that keeps every row, a projection that keeps every field, and no
-order. @ch-keydir takes apart the index `open` builds.
+order. @ch-keydir adds the first condition that drops rows, and the index that answers it.
 
 #takeaways(
   [yabiir has no SQL: a query is translated by hand into calls on its API, and the translation runs.],
@@ -175,6 +175,3 @@ order. @ch-keydir takes apart the index `open` builds.
   [Without `ORDER BY`, any order is correct, and yabiir's changes with each open.],
 )
 
-#todo(
-  [`WHERE key = …`: the first selection that drops rows, and the `get` it needs.],
-)

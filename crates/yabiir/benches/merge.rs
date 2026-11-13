@@ -40,12 +40,38 @@ fn build_dataset(num_keys: usize, versions_per_key: usize, value_size: usize) ->
     (dir, db)
 }
 
-/// The cheap path: nothing to compact (only the active file exists, so
-/// `input_ids` is empty and `merge` returns immediately). Confirms that
-/// case is actually near-free, not accidentally doing a full directory
-/// scan's worth of work for nothing.
+/// The cheap path: an empty store, with no data files at all, so there is
+/// nothing to compact and `merge` returns as soon as it has looked.
+/// Confirms that case is actually near-free, not accidentally doing a full
+/// directory scan's worth of work for nothing.
+///
+/// Until v0.7.0 this benchmark wrote 50 keys first. That was a no-op while
+/// merge left the active file alone; since merge seals and compacts the
+/// active file too, it is a real merge, now measured by
+/// `merge_active_only`.
 fn bench_merge_noop(c: &mut Criterion) {
     c.bench_function("merge_noop", |b| {
+        b.iter_batched(
+            || {
+                let dir = TempDir::new();
+                let db = Engine::open(&*dir, Options::default()).unwrap();
+                (dir, db)
+            },
+            |(dir, db)| {
+                db.merge()
+                    .unwrap(); // unit result — nothing for black_box to guard
+                (dir, db) // keep both alive until the batch is torn down
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+/// The smallest real merge: 50 keys, all in the active file. Merge seals it,
+/// copies the keys into a merge output with its hint file, and fsyncs, so
+/// this measures merge's fixed cost, which the fsyncs dominate.
+fn bench_merge_active_only(c: &mut Criterion) {
+    c.bench_function("merge_active_only", |b| {
         b.iter_batched(
             || {
                 let dir = TempDir::new();
@@ -58,8 +84,8 @@ fn bench_merge_noop(c: &mut Criterion) {
             },
             |(dir, db)| {
                 db.merge()
-                    .unwrap(); // unit result — nothing for black_box to guard
-                (dir, db) // keep both alive until the batch is torn down
+                    .unwrap();
+                (dir, db)
             },
             BatchSize::SmallInput,
         );
@@ -128,6 +154,7 @@ fn bench_merge_by_input_file_count(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_merge_noop,
+    bench_merge_active_only,
     bench_merge_by_dead_ratio,
     bench_merge_by_input_file_count,
 );

@@ -7,6 +7,8 @@ use std::process::Command;
 
 use serde_json::{Map, Value, json};
 
+use crate::machine::Machine;
+
 /// Where the recorded medians live, one JSON file per measured version.
 const HISTORY_DIR: &str = "bench-history";
 
@@ -27,10 +29,14 @@ pub(crate) fn bench(args: &[String]) -> Result<(), String> {
         }
     }
     let cpu = cpu.as_deref();
+    let machine = Machine::inspect(cpu);
+    for warning in machine.warnings(cpu) {
+        eprintln!("warning: {warning}");
+    }
     if refs.is_empty() {
         let label = working_tree_label()?;
         let commit = git_out(&root, &["rev-parse", "HEAD"])?;
-        return measure(&root, &root, &label, &commit, cpu);
+        return measure(&root, &root, &label, &commit, cpu, &machine);
     }
     for git_ref in &refs {
         let commit = git_out(&root, &["rev-parse", &format!("{git_ref}^{{commit}}")])?;
@@ -49,7 +55,7 @@ pub(crate) fn bench(args: &[String]) -> Result<(), String> {
             &root,
             &["worktree", "add", "--detach", path_str(&worktree)?, &commit],
         )?;
-        let result = measure(&root, &worktree, git_ref, &commit, cpu);
+        let result = measure(&root, &worktree, git_ref, &commit, cpu, &machine);
         git(
             &root,
             &["worktree", "remove", "--force", path_str(&worktree)?],
@@ -67,6 +73,7 @@ fn measure(
     label: &str,
     commit: &str,
     cpu: Option<&str>,
+    machine: &Machine,
 ) -> Result<(), String> {
     let criterion_home = root.join("target/criterion");
     println!("== {label} ({commit:.10}) in {}", tree.display());
@@ -121,6 +128,7 @@ fn measure(
         "rustc": command_out(Command::new("rustc").arg("-V"))?,
         "cpu": cpu_model(),
         "pinned_cpu": cpu,
+        "machine": machine.to_json(),
         "unit": "ns",
         "results": results,
     });

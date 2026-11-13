@@ -22,8 +22,12 @@
 //! pin the measurement to one performance core for less noise, e.g.
 //! `cargo xtask bench --cpu 6 v0.6.0` (it builds on every core, then
 //! measures under `taskset -c 6`).
+//! Before measuring it warns about settings that make the clock drift
+//! (turbo boost, a governor other than `performance`, an online hyperthread
+//! sibling of the pinned core) and records them in the history file.
 
 mod bench;
+mod machine;
 
 use std::process::{Command, ExitCode};
 

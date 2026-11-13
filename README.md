@@ -114,6 +114,8 @@ Full design writeups — including the profiling methodology and measured before
   behavior above; that's covered by unit tests and `loadtest` instead.
 - `cargo xtask bench [REF…]` records the Criterion medians of the working tree, or of any tag or commit, in
   `bench-history/`; `cargo xtask bench-table` prints them side by side.
+  It warns first about settings that make the clock drift (turbo boost, the frequency governor, an online hyperthread
+  sibling of the pinned core) and records them with the numbers.
 
 ## Observability
 

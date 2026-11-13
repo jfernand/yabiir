@@ -288,3 +288,31 @@ ahead throughout.
   `src/merge.rs`'s own module comment (a key written *truly concurrently*
   with a merge touching it can still be misordered by a later recovery) is
   unrelated to this change and remains exactly as it was.
+
+= Addendum, 2026-11-12: What Changed Since <sec-addendum>
+
+This report describes the change as it was made, and the names it uses are
+the names of that day. The design it describes is unchanged: merge writes
+its output unflushed, flushes once per 256 entries or when an output file
+fills up, and repoints a key only after the flush that covers its copy.
+
+*The names moved.* `MergeOutputWriter` is `OutputWriter` in
+`crates/yabiir/src/merge/output.rs`; the deferred repoints are
+`PendingRepoints` in `merge/repoints.rs`; `ActiveFile::flush_only` is
+`ActiveFile::flush`. Hint files have a writer of their own,
+`merge/hint.rs`.
+
+*Merge reads faster too.* The input side had the mirror image of the
+problem this report fixed on the output side: each entry was read with two
+`read` syscalls on an unbuffered file, and a whole input file was held in
+memory before any of it was copied. Input is now read through one 256 KiB
+buffer, an entry at a time. On the load test of § 5 (4 threads, a merge
+every 3 seconds) a pass that took 2.1–2.6 s takes 0.6–1.1 s.
+
+*The ordering gap is closed.* The last section calls the merge/recovery
+file-ordering gap unrelated and unchanged. It is fixed: a merge now closes
+the active file and reserves the ids of its output files, in one step under
+the writer's lock, below the id of every file written afterwards. A write
+made during a merge is replayed after the merge's copy of the same key, and
+stays the last write after a reopen. The module documentation of
+`src/merge/mod.rs` has the argument.

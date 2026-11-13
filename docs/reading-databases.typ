@@ -1383,7 +1383,9 @@ Durability is configurable. `MDB_NOSYNC` and `MDB_NOMETASYNC` skip some or all o
 yabiir makes with `sync_on_put`.
 
 #callout(kind: "ok", "For yabiir")[
-  yabiir also has one writer in effect: appends are serialised under the active file's lock.
+  yabiir also has one writer, and since this report was first written it has been made strict:
+  an append and the keydir update that publishes it are one step under the writer's lock
+  (`crates/yabiir/src/writer.rs`), so the keydir changes in the order of the log.
   What it lacks is the _transaction_ around them. In LMDB, atomicity comes for free from the
   meta-page swap, because a transaction's pages become visible all at once or not at all. In a
   log, atomicity has to be written into the log, as the batch record of Part I's §9. The two
@@ -1636,9 +1638,11 @@ These notes are proposals, in the spirit of Part I's §14.
 + *Should yabiir's read path offer zero copy?* A borrowed-value API (`get_ref`, valid while a read
   snapshot lives) is possible with `pread` into a reusable buffer, without mmap. It would show the
   API cost of zero copy without the risks.
-+ *Where does the book stand on the one-writer rule?* yabiir already serialises appends. Making
-  that a documented rule, as LMDB does, and saying what it gives up, is a paragraph. Arguing
-  against it needs a benchmark.
++ *Where does the book stand on the one-writer rule?* yabiir now has it as a documented rule
+  (ROADMAP §3, and the module documentation of `writer.rs`): one writer, one total order of
+  writes, and sharding the keydir or the active file is out of scope. Saying what that gives
+  up, as LMDB's paper does with its modify benchmark, is still a paragraph the book owes.
+  Arguing against the rule needs a benchmark.
 
 
 #bibliography("reading-databases.bib", title: "References", style: "ieee")

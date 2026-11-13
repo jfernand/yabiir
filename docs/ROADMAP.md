@@ -6,9 +6,12 @@ protects the data itself, since that's the thing a key/value store can least aff
 
 ## 1. Correctness and data integrity
 
-The property-based model test (`tests/model.rs`) and the concurrency stress tests already catch real bugs — the
-merge/recovery ordering issue documented in `src/merge/mod.rs` was found exactly this way — but they only exercise
-one process, on one machine, with no injected faults beyond what a proptest sequence of operations can express. The
+The property-based model test (`tests/model.rs`), the concurrency stress tests and the hook-driven race tests
+(`src/engine/tests/races.rs`) already catch real bugs — the merge/recovery ordering issue was found by the model test,
+and its concurrent form by a race test — but they only exercise one process, on one machine, with almost no injected
+faults: one test makes a merge fail part-way, and nothing makes an append or an fsync fail. The code paths for those
+failures (`src/writer.rs` closes the active file and starts a new one; `src/commit.rs` fails every write a failed fsync
+might have covered) are reasoned through and unit-tested at the group-commit level, not exercised end to end. The
 next step up is deterministic simulation testing: running the engine under a harness like `madsim` or `turmoil` (or
 similar deterministic-simulation frameworks) that can inject disk latency, reordering, and partial writes, then
 replay any failure byte-for-byte to debug it. Getting there needs two things the codebase doesn't have yet. First,
@@ -18,8 +21,8 @@ just pick one seed per process — every `HashMap::default()` construction gets 
 even two `Keydir`s in the *same* run, let alone two "identical" simulated runs, wouldn't see the same internal
 hash-bucket layout — that defeats reproducible replay entirely. A `BTreeMap` (deterministic iteration order by
 construction) or `ahash::RandomState::with_seeds` (a genuinely fixed seed), swapped in only for the simulation build,
-would fix that without touching the production default. Second, the file system access in `datafile.rs`, `lock.rs`,
-and `recovery.rs` talks directly to
+would fix that without touching the production default. Second, the file system access in `datafile/`, `lock.rs`,
+`recovery/` and `merge/` talks directly to
 `std::fs` and `std::os::unix::fs::FileExt` — a real simulation needs that behind a trait it can substitute a
 fault-injecting implementation for, which is a genuine architectural change, not a config flag.
 
@@ -28,19 +31,20 @@ a client actually issued and whether it was acknowledged, then checking the stat
 process mid-run is consistent with *some* valid prefix of those acknowledged operations — would verify the crash
 recovery story empirically instead of by code review. Power failure testing is the sharper version of the same
 question, aimed specifically at the `should_sync_on_put` guarantee: the reasoning for why a `put` that returns `Ok`
-under `should_sync_on_put: true` is durable against a true power loss is laid out in `src/commit.rs` and the two
-`.typ` design reports, but nothing today actually pulls power (or simulates it, e.g. with block-layer fault
+under `should_sync_on_put: true` is durable against a true power loss is laid out in `src/commit.rs`,
+`src/writer.rs` and the two `.typ` design reports, but nothing today actually pulls power (or simulates it, e.g. with block-layer fault
 injection) to confirm it. That reasoning has never been checked against reality.
 
 Where to start:
 
-- Make the keydir's hasher swappable first — a `#[cfg(feature = "dst")]` build using `BTreeMap` or a fixed-seed
-  `RandomState` instead of the production default needs no file system work, so it's small enough to land on its own
-  and start proving out the approach.
-- Scope the file system abstraction down to `datafile.rs` first (the path everything else depends on), leaving
-  `lock.rs` and `recovery.rs` for later rather than doing all three at once.
+- The keydir's determinism is already available: a store opened with `KeyOrder::Sorted` keeps its keys in a
+  `BTreeMap`, with no hasher at all. A simulation build can simply open that way.
+- Scope the file system abstraction down to `datafile/` first (the path everything else depends on: `ActiveFile`,
+  `DataFileSet` and the scanner are the only code that opens, reads or writes a data file), leaving `lock.rs` and the
+  hint files for later rather than doing everything at once. The first payoff is small and concrete: tests that make
+  an append or an fsync fail and check that the next write lands in a new file and nothing acknowledged is lost.
 - Before committing to `madsim` or `turmoil`, check whether either actually fits a synchronous, thread-based engine
-  like this one — both are built around async network services. `loom` (already a known gap for `src/keydir.rs`) or
+  like this one — both are built around async network services. `loom` (a known gap) or
   `shuttle` may be a closer match for exploring thread interleavings, and a hand-rolled fault-injecting file system
   driven by proptest-generated fault schedules may cover the disk side without a full simulator at all.
 - For Jepsen-style testing, skip the Jepsen/Clojure stack — a purpose-built harness that drives the `kv` CLI (or a
@@ -53,12 +57,19 @@ Where to start:
 ## 2. Resilience and fault tolerance
 
 Crash recovery already exists and is tested for the ordinary case — kill the process, reopen, get back everything
-that was durably written. What's still open is the known gap in `src/merge/mod.rs`: a key written *truly
-concurrently* with a merge touching that same key can end up misordered on a *later* reopen, even though the
-in-memory keydir stays correct for the rest of that session. Closing it needs merge output to reuse the file ids it
-frees rather than always claiming new ones, via a rename step careful enough that a concurrent reader never observes
-a renamed-but-not-yet-repointed file under stale coordinates. That's the concrete next milestone under this heading,
-not a vague hardening pass.
+that was durably written. The gap that used to head this section is closed: a key written while a merge ran could be
+replayed *before* the merge's older copy of it on a later reopen, and come back with the old value. A merge now fixes
+its scope in one step under the writer's lock (`Writer::seal_for_merge`): it closes the active file and reserves the
+ids of its output files below the id of every file written afterwards, so id order is the order of writes again, also
+when a merge fails or the process dies in the middle of one. What remains under this heading is narrower:
+
+- A read-only handle in another process holds no lock and isn't told about merges, so a merge can remove files it
+  still points into. Either document it as a snapshot that must be reopened (done) or give it a way to notice.
+- Recovery skips a corrupt entry using the lengths in its header. If the header is what was damaged, the rest of the
+  file is lost to the scan. A resynchronizing scan, or a per-file index like the hint files for every closed file,
+  would bound the damage.
+- `open` keeps one descriptor per data file. Thousands of unmerged files need a matching descriptor limit; an LRU of
+  read handles would remove the coupling.
 
 The engine also has no backpressure today. `put` and `delete` always succeed immediately regardless of how far merge
 has fallen behind — under sustained write load, rotated files just pile up, and merge's own pass duration grows with
@@ -72,12 +83,8 @@ rebuild-into-a-fresh-map pass, rather than leaving it to whatever the system all
 
 Where to start:
 
-- The ordering gap has a clear, test-first path: write a regression test that reproduces it (a key written truly
-  concurrently with a merge touching it, followed by a reopen, matching the scenario already described in
-  `src/merge/mod.rs`'s module doc), confirm it fails today, then design the rename-based fix against that failing
-  test — the same way every fix landed during this project's mutation-testing and group-commit work was verified.
 - For backpressure, the cheap version: cap `put`/`delete` (block, or return an error) once the count of un-merged
-  rotated files crosses a configurable threshold — a small, local change to `Engine::append`.
+  files crosses a configurable threshold — a small, local change to `Writer::append`.
 - The more thorough version: have `Engine` schedule its own background merge automatically past a low-water mark,
   instead of leaving callers (like `loadtest`'s `--merge-interval-secs`) to manage timing themselves — a bigger
   change than the cap above.
@@ -89,8 +96,8 @@ Where to start:
 
 Bitcask's design fixes the shape of the write path: one writer process, one active file, every write an append, and
 the keydir updated after each append. Everything tuned so far made that one path cheaper without changing its shape:
-dropping the active-file read lock, batching merge's flushes, and group commit, which shares fsyncs across
-concurrent writers. That is the rule for what comes next too. Sharding the keydir and writing to more than one
+dropping the active-file read lock, batching merge's flushes, reading files through a buffer when scanning them,
+and group commit, which shares fsyncs across concurrent writers. That is the rule for what comes next too. Sharding the keydir and writing to more than one
 active file are out of scope: both would end the single total order of writes that recovery, merge and the keydir
 all rely on, for throughput no benchmark has shown yabiir needs.
 
@@ -105,14 +112,13 @@ corrupted or vanished backing file, instead of a `Result`) and the larger-than-m
 `docs/reading-databases.pdf` §24, so either one should sit behind a feature flag next to the plain path, not replace
 it.
 
-The single writer is now strict. A put or delete appends and updates the keydir in one critical section under the
-active-file mutex (`Engine::append` takes the publish as a closure), so the keydir changes in log order, as the
-paper's keydir is "atomically updated with the location of the newest data". The `race_*_publish_in_log_order` tests
-in `engine.rs` pin it down; before the change, the session could read an older value than a reopen would restore,
-or see a deleted key come back. The separate publish gate that kept merge from choosing inputs mid-publish went away
-with it, since the mutex now does that job. One consequence: with `sync_on_put`, the fsync still runs after the mutex
-is released (group commit), so a write becomes visible to readers just before it is durable and before its `put`
-returns.
+The single writer is strict, and has a home: `src/writer.rs`. A put or delete appends and updates the keydir in one
+critical section under the writer's lock (`Writer::append` takes the publish as a closure), so the keydir changes in
+log order, as the paper's keydir is "atomically updated with the location of the newest data". Rotation and the start
+of a merge happen under the same lock. The `race_*_publish_in_log_order` tests pin the order down. One consequence:
+with `sync_on_put`, the fsync still runs after the lock is released (group commit), so a write becomes visible to
+readers just before it is durable and before its `put` returns. Making visibility wait for durability would need
+writes to publish in order *after* their shared fsync, a queue this design doesn't have.
 
 Tail latency is the thread connecting all of this, and it isn't finished: the merge-batched-flushing report already
 notes that pass duration climbs over a sustained run, because more data accumulates between merges than the
@@ -122,47 +128,43 @@ above, looked at from the latency side rather than the correctness side.
 
 Where to start:
 
-- Measure what the wider (now strict) critical section costs with `loadtest` at high writer counts. It adds one keydir insert to a
-  section that already holds a `write()` syscall; the fsync stays outside it, via group commit.
+- The strict critical section costs nothing measurable: a 4-thread `loadtest` run (80 % reads, merge every 3 s) is
+  slightly faster after the change than before it. Measure again at high writer counts with `sync_on_put`, where the
+  lock is most contended. A rotation still fsyncs the file it closes while holding the lock; moving that fsync out
+  from under it is the obvious next cut in write tail latency.
+- Merge reads its input about three times faster than it did (a 256 KiB read buffer instead of two `read` calls per
+  entry). It still copies every live entry on every pass, and still takes the keydir's lock once per entry to check
+  liveness and once per entry to repoint; batching those is the next thing to profile.
 - Don't adopt `io_uring` or `mmap` as the first move: consistent with how every other performance fix here started
   (profile, then fix what profiling actually shows), run `loadtest`/flamegraph under enough concurrent I/O pressure to
   confirm syscall overhead or the read copy is really the bottleneck first — the `io-uring` crate for the write path,
   `memmap2` for reads, if it is. Keep each behind a feature flag and the existing `DataFileSet`/`ActiveFile`
-  boundaries, so the plain `pread`/`write` path stays the default and the model test runs against both.
+  boundaries (`datafile/pread.rs` is the whole read path; `ActiveFile::append` and `sync` the whole write path), so
+  the plain `pread`/`write` path stays the default and the model test runs against both.
 - Try incremental, resumable merge (process a bounded number of input files or entries per call, resumable across
   calls) before either full backpressure or a scheduler rewrite — it's the smallest of the tail-latency options,
-  contained entirely within `merge/mod.rs`.
+  contained entirely within `merge/`.
 
 ## 4. Observability
 
-There's currently no way to see any of this from outside the process. No counters for how many `put`/`get`/
-`delete`/`merge` calls happened or how long they took, no visibility into keydir size, active file size, or how far
-merge has fallen behind — everything this project knows about its own performance came from external tools
-(`loadtest`, `cargo flamegraph`, Criterion) run by hand, not from the engine reporting on itself. A real metrics
-story means instrumenting `Engine` with counters and histograms for the operations that matter, exposed through a
-trait or callback so a caller can wire them into whatever backend they already use, rather than the crate picking
-one and forcing that dependency on everyone.
+The first two pieces are in place. `Options::metrics` takes an `Arc<dyn Metrics>` (`src/metrics.rs`): durations of
+`put`/`get`/`delete`/`merge`/`sync`, the depth of merge's repoint queue at each flush, and a summary per merge pass
+(files compacted, entries copied). The crate picks no backend; `examples/bsky_firehose.rs` in `yabiir-examples` shows
+one wired to a live dashboard. With the `tracing` feature, the warnings recovery and merge print (corrupt or truncated
+entries, unusable hint files) go through `tracing::warn!` instead of stderr, and merge's phases — seal, copy, flush,
+remove old files — are spans.
 
-Logging today is a handful of bare `eprintln!` calls in `recovery.rs` and `merge/mod.rs`, for truncated entries and
-CRC mismatches — no levels, no structure, no way to redirect or suppress them, and (as the mutation-testing pass
-over this codebase found) not even exercised by a single test. Routing those through `tracing` instead would fix
-the structure problem and also open the door to the more useful piece: spans around merge's phases — scan,
-copy-forward, flush, remove old files — so an operator can see which part of a slow merge pass was actually slow,
-instead of only the total duration a load generator measured from outside.
+What's missing is the state, as opposed to the events: nothing reports the keydir's size, the number of data files,
+the bytes on disk against the bytes that are live, or how long the writer's lock was held. Those are what an operator
+needs to decide when to merge, and what backpressure (§2) would be driven by.
 
 Where to start:
 
-- Logging is the smallest, lowest-risk piece and doesn't need to wait for the rest: replace the handful of
-  `eprintln!` calls in `recovery.rs` and `merge/mod.rs` with `tracing::warn!` (or `log::warn!`), behind an optional
-  feature so consumers who don't want the dependency aren't forced into it — a mechanical change that could land on
-  its own.
-- Add tracing spans around merge's phases as a natural follow-on once `tracing` is already a dependency for logging,
-  not as a separate effort.
-- For metrics, the bigger design question: give `Engine` a small `Metrics` trait it takes as an optional
-  `Arc<dyn Metrics>` at `open()` time (defaulting to a no-op), keeping the crate itself backend-agnostic — matching
-  how `format`/`datafile`/`keydir` are already `pub` "internal building blocks, not stable public API" rather than a
-  fixed public surface. A `tracing`- or `metrics`-crate-backed adapter could ship as an example rather than a hard
-  dependency.
+- Add gauges to `Metrics`, or a `stats()` call on `Engine`: key count, data file count, total and live bytes. Live
+  bytes need the keydir to keep a running sum per file, which is also what a merge that skips mostly-live files would
+  need.
+- Count errors, not just durations: a failed append or fsync, a corrupt entry skipped at recovery.
+- Test the warnings. They are still not asserted on by any test.
 
 ## 5. Aging
 
@@ -176,9 +178,9 @@ imagine.
 
 Soaking is the same idea applied to time instead of traffic shape: running under load for days, not tens of
 seconds, to catch what only shows up slowly — the keydir fragmentation risk mentioned above, merge backlog trending
-upward faster than merge can clear it, and `DataFileSet`'s read-handle cache, which today never evicts anything and
-is documented as relying on the assumption that "a real Bitcask directory has at most a few thousand files even at
-scale, thanks to merge." That's a reasonable assumption. It has never actually been tested.
+upward faster than merge can clear it, and `DataFileSet`'s read-handle cache, which keeps one open descriptor per data
+file until a merge removes the file, on the assumption that merge keeps the number of files in the low thousands.
+That's a reasonable assumption. It has never actually been tested.
 
 Where to start:
 

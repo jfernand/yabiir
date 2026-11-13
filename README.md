@@ -20,6 +20,8 @@ Sheehy & Smith's 2010 paper (included locally at [`refs/bitcask-intro.pdf`](refs
   return keys in order. Nothing about it is stored on disk, so a store opens either way. `benches/keydir_order.rs`
   measures what the order costs
 - A process-level single-writer lock, so two writable (`is_read_write: true`) handles can't corrupt the same directory
+- A small SQL front end over a store, in its own crate (`yabiir-sql`): `SELECT [DISTINCT] * | key | value [WHERE key =
+  … | WHERE key BETWEEN … AND …]`, parsed, planned onto `get`/`scan`/`fold`, and executed
 - A small CLI (`kv`) and a synthetic load generator (`loadtest`) for exercising it
 - Optional observability: `put`/`get`/`delete`/`merge`/`sync` call durations via `Options::metrics`, and structured
   logging/spans via the `tracing` feature — see [Observability](#observability)
@@ -44,6 +46,9 @@ See [`examples/basic_usage.rs`](crates/yabiir/examples/basic_usage.rs) for the f
 cargo run --example basic_usage
 ```
 
+The larger examples, which need a terminal UI or an async runtime, are in `crates/yabiir-examples`: `cargo run --example
+todo_tui` and `cargo run --example bsky_firehose`.
+
 The `kv` CLI covers the same operations from the shell:
 
 ```sh
@@ -53,24 +58,43 @@ cargo run --bin kv -- /tmp/my-data list
 cargo run --bin kv -- /tmp/my-data merge
 ```
 
+## The workspace
+
+| Crate | What it is |
+|---|---|
+| [`crates/yabiir`](crates/yabiir) | The storage engine. The one published crate; depends on `crc32fast`, `fs2`, `ahash` and, optionally, `tracing`. |
+| [`crates/yabiir-sql`](crates/yabiir-sql) | The SQL front end: parser, AST, planner, executor, over yabiir's public API. |
+| [`crates/yabiir-cli`](crates/yabiir-cli) | `kv`, the command-line tool. |
+| [`crates/yabiir-loadtest`](crates/yabiir-loadtest) | `loadtest`, the load generator. |
+| [`crates/yabiir-examples`](crates/yabiir-examples) | Example programs with heavy dependencies. |
+| [`crates/yabiir-testutil`](crates/yabiir-testutil) | A self-removing temporary directory, shared by tests and benches. |
+| [`xtask`](xtask) | Dev tooling: `cargo xtask release`, `cargo xtask bench`. |
+
+Inside the engine, bottom up: `format` (the bytes of an entry and of a hint record), `datafile` (the files: appending,
+positioned reads, scanning), `keydir` (the in-memory index), `writer` (the single writer: append, publish, rotate),
+`commit` (group commit), `recovery` (rebuilding the keydir at open), `merge` (compaction), and `engine`, which puts them
+behind the `Bitcask` trait.
+
 ## Performance
 
 The design goal is **predictable latency**, not just peak throughput — a storage engine that's fast on average but
 occasionally stalls for tens of milliseconds is worse for most real workloads than one that's a bit slower but
 consistent. A few design choices follow directly from that:
 
-- `get`/`fold` never take a lock on the active (currently-written-to) file — every write flushes before returning, so
-  a fresh, independent read handle always sees the same bytes a locked read would.
+- `get`/`fold` never take the writer's lock — every write is handed to the OS before its location is published, so
+  an independent read handle always sees the bytes the keydir points at.
+- There is one writer, strictly: an append and the keydir update that publishes it are one step under one lock, so the
+  keydir changes in the order of the log. Readers aren't behind that lock.
 - The keydir's `HashMap` uses `ahash` rather than the default SipHash or `rustc-hash`/FxHash: `ahash` is fast without
   FxHash's weakness on sequential/structured keys (`key-0000000042`-style — auto-incrementing IDs, timestamps,
   zero-padded counters), which can collapse almost every key into one hash bucket and turn O(1) map operations into
   O(n).
-- `merge`'s compaction pass batches its flushes (every 256 entries, or immediately at a rotation boundary) instead of
+- `merge`'s compaction pass batches its flushes (every 256 entries, or when an output file fills up) instead of
   flushing after every entry, with keydir repoints deferred to line up with each batch — so a long merge running
   concurrently with live traffic doesn't stall foreground `put`/`get`/`delete` calls behind its own I/O.
-- With `should_sync_on_put: true`, concurrent writers share a single `fsync` (group commit, `src/commit.rs`) instead
-  of each paying for their own — one caller becomes the leader and fsyncs without holding the write lock, everyone
-  else just waits for that shared fsync to cover their write.
+- With `should_sync_on_put: true`, concurrent writers share a single `fsync` (group commit,
+  `crates/yabiir/src/commit.rs`) instead of each paying for their own — one caller becomes the leader and fsyncs
+  without holding the write lock, everyone else just waits for that shared fsync to cover their write.
 
 Full design writeups — including the profiling methodology and measured before/after numbers — live in
 [`docs/merge-batched-flushing.pdf`](docs/merge-batched-flushing.pdf)
@@ -79,15 +103,17 @@ Full design writeups — including the profiling methodology and measured before
 
 **Tooling, if you want to reproduce or extend this:**
 
-- `src/bin/loadtest.rs` — a configurable mixed get/put/delete load generator that reports periodic p50/p90/p99/p99.9/max
+- `crates/yabiir-loadtest` (`cargo run --release --bin loadtest -- <dir>`) — a configurable mixed get/put/delete load generator that reports periodic p50/p90/p99/p99.9/max
   latency per operation kind, specifically so pauses show up as a visible spike rather than getting smoothed into an
   average.
 - `scripts/flamegraph.sh` — wraps `cargo flamegraph --profile profiling --bin loadtest` (the `profiling` Cargo profile
   keeps release optimizations but adds debug symbols so frames resolve to real function names).
 - `cargo bench` — Criterion suites for `format`, `keydir`, `datafile`, and `merge`, each isolating one layer's cost.
   Note that `benches/merge.rs` fixes `max_file_size: 1` to control the live/dead entry ratio precisely, which as a
-  side effect forces a rotation (and its fsync) on every entry — so it can't isolate the flush-batching behavior
-  above; that's covered by unit tests and `loadtest` instead.
+  side effect puts every entry in a file of its own (with its fsync) — so it can't isolate the flush-batching
+  behavior above; that's covered by unit tests and `loadtest` instead.
+- `cargo xtask bench [REF…]` records the Criterion medians of the working tree, or of any tag or commit, in
+  `bench-history/`; `cargo xtask bench-table` prints them side by side.
 
 ## Observability
 
@@ -107,24 +133,39 @@ opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
   files) in `tracing` spans. Without the feature, warnings still go to stderr via `eprintln!` — nothing is silently
   dropped either way.
 
-[`examples/bsky_firehose.rs`](crates/yabiir/examples/bsky_firehose.rs) wires up a `Metrics` implementation and renders it as a live
+[`examples/bsky_firehose.rs`](crates/yabiir-examples/examples/bsky_firehose.rs) wires up a `Metrics` implementation and renders it as a live
 `ratatui` dashboard alongside its own application-level stats — a working example of both hooks together.
+
+## Durability and failures
+
+- **Without `should_sync_on_put`** (the default), a write is handed to the OS before `put` returns: it survives a crash
+  of the process, but a power failure can lose the last writes. With it, `put` returns once the entry is fsynced.
+- **A closed file is durable.** A data file is fsynced when it fills up and is closed, and the directory is fsynced
+  when a file is created or removed, so a file's name is as durable as its contents.
+- **A failed write or fsync is not retried.** The kernel reports a failed write-back once; a second fsync can succeed
+  although the data is gone. So a failed fsync fails every write that wasn't known durable, and the file is closed:
+  the next write starts a new one. A write that returned an error may or may not have taken effect.
+- **A write made during a merge wins**, in the session and after a reopen. Merge output takes file ids below those of
+  everything written after the merge started, and recovery replays files in id order.
+- **A crashed or failed merge loses nothing.** Its partial output holds copies of entries the input still has.
 
 ## Known limitations
 
-These are called out explicitly in the relevant module docs, not hidden:
-
-- **Merge/recovery ordering gap** (`src/merge/mod.rs`): a key written *truly concurrently* with a merge that also
-  touches that key can, in rare cases, be resolved incorrectly by a *subsequent* recovery/reopen — even though the
-  live, in-memory keydir stays correct for the rest of that session. Closing this fully needs merge output to reuse
-  freed file ids via a carefully-ordered rename step; not implemented.
-- **No loom coverage** for `src/keydir.rs`'s concurrency, flagged as optional in the implementation plan and never
-  picked up.
+- **With `should_sync_on_put`, a write is visible slightly before it is durable.** The keydir is updated when the entry
+  is handed to the OS; the shared fsync comes after. Another thread can read a value that a power failure in that
+  window would lose. The writer itself isn't told `Ok` until the fsync is done.
+- **A read-only handle is a snapshot.** It sees the store as it was at open, and it holds no lock, so a merge in the
+  writing process can remove files it still needs. Reopen it after a merge.
+- **Reads don't verify CRCs.** An entry's CRC is checked when a file is scanned (recovery, merge), not on `get`.
+- **Corruption in the middle of a file** is skipped entry by entry, using the lengths in the corrupt entry's header. If
+  the header itself is damaged, the rest of that file may be unreadable.
+- **`open` holds one file descriptor per data file.** A store with thousands of unmerged files needs a matching
+  `ulimit -n`. Merge regularly.
+- **Every merge rewrites the whole store.** There is no threshold of dead bytes below which a file is left alone.
 - **The single-writer lock is a best-effort `flock`**, not reliable on network filesystems (NFS in particular). Don't
   point this at an NFS mount and expect the lock to actually exclude a second writer.
-- **`should_sync_on_put` defaults to `false`** — writes are flushed (visible to concurrent readers, survives a process
-  crash) but not `fsync`'d by default, so a true power outage can lose the last few writes unless you opt into
-  `should_sync_on_put: true`. This is a standard, documented tradeoff, not a bug.
+- **Unix only**: values are read with `pread`.
+- **No loom coverage** of the concurrency: it is tested with deterministic hooks and stress tests instead.
 
 ## Testing
 
@@ -134,9 +175,10 @@ PROPTEST_CASES=2000 cargo test --test model  # more property-based cases, for ex
 cargo bench                                  # Criterion suites — format, keydir, datafile, merge
 ```
 
-The proptest model test runs random sequences of `put`/`delete`/`get`/`reopen`/`merge` against a plain `HashMap`
-reference model over a small, deliberately-colliding key alphabet, exercising the same recovery/merge ordering edge
-cases described in [Known limitations](#known-limitations).
+The proptest model test runs random sequences of `put`/`delete`/`get`/`reopen`/`merge` against a plain map as the
+reference model, over a small, deliberately-colliding key alphabet. The races (a merge between a lookup and its read,
+a write during a merge, two writes to one key) are unit tests in `crates/yabiir/src/engine/tests/races.rs`: each uses
+a hook to stop one thread at the exact point of interest, so none depends on timing.
 
 CI (`.github/workflows/ci.yml`) runs `rustfmt --check`, `clippy -D warnings`, and the full test suite (including
 doctests and an extra-cases proptest run) on every push and pull request, on Linux and macOS.
@@ -144,7 +186,8 @@ doctests and an extra-cases proptest run) on every push and pull request, on Lin
 ## Releasing
 
 Publishing to crates.io (`.github/workflows/publish.yml`) is triggered by pushing a tag matching `v*.*.*`, whose
-version must exactly match `Cargo.toml`'s. After bumping the version and committing that:
+version must exactly match `crates/yabiir/Cargo.toml`'s. Only `yabiir` is published; the other crates are
+`publish = false`. After bumping the version and committing that:
 
 ```sh
 cargo xtask release
@@ -152,7 +195,7 @@ cargo xtask release
 
 This is a small [xtask](https://github.com/matklad/cargo-xtask)-style dev-tooling crate (`xtask/`, a workspace
 member, `publish = false` — it never ships with the published `yabiir` crate). It reads the version straight from
-`Cargo.toml`, then runs `git tag v<version>` and `git push origin` that tag, which triggers the publish workflow. It
+`crates/yabiir/Cargo.toml`, then runs `git tag v<version>` and `git push origin` that tag, which triggers the publish workflow. It
 refuses to run with a dirty working tree or a tag that already exists, rather than tagging the wrong commit or
 silently no-op-ing. `cargo xtask <anything else>` prints the available tasks.
 

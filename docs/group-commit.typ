@@ -383,3 +383,36 @@ combined):
 - *The known merge/recovery file-ordering gap* documented in
   `src/merge.rs`'s module comment is unrelated to this change and remains
   exactly as it was.
+
+= Addendum, 2026-11-12: What Changed Since <sec-addendum>
+
+This report describes the change as it was made on 2026-09-17, and the code
+it quotes is the code of that day. Three things are different now.
+
+*A failed fsync is no longer retried.* § 3 called retrying "a reasonable
+default". It isn't safe on Linux: the kernel reports a failed write-back to
+the next `fsync` and then marks the pages clean, so a second `fsync` of the
+same file can succeed although the data never reached the disk. A waiter
+that retried as the new leader could therefore return `Ok` for a write that
+was lost. Now a failed fsync fails every write that wasn't durable when the
+fsync started, the leader's and the waiters' alike, and they stay failed
+whatever syncs succeed meanwhile or afterwards; the writer drops the file
+before anyone else can append to it, and the next write starts a new one. A caller that gets an error can't tell whether its write survived.
+A caller that gets `Ok` can. The coordinator also recovers if the leader's
+fsync panics, instead of leaving every later writer waiting.
+
+*The code moved.* The coordinator is still `src/commit.rs` (now
+`crates/yabiir/src/commit.rs`), with the counters renamed
+`newest_generation` and `durable_generation`. `Engine::append` became
+`Writer::append` in `src/writer.rs`, which owns the active file, the file-id
+counter and the coordinator behind one lock. A write that doesn't ask for
+`sync_on_put` no longer takes a generation at all.
+
+*The keydir is updated inside the append lock*, before the shared fsync,
+not after it. That closed a race in which two writes to one key could update
+the keydir out of log order. Its cost is stated in the README: with
+`sync_on_put`, another thread can read a value just before it is durable.
+The writer itself still returns only after the fsync.
+
+The merge/recovery ordering gap that the last section calls unrelated is
+closed too; `src/merge/mod.rs` explains how.

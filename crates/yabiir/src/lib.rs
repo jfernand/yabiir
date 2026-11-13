@@ -13,6 +13,10 @@ mod log;
 mod merge;
 mod metrics;
 mod recovery;
+// A small SQL front end — parser, AST, planner, executor — over one store;
+// documented in src/sql/mod.rs.
+#[cfg(feature = "sql")]
+pub mod sql;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 // The actual public API: everything a consumer of this crate (e.g.

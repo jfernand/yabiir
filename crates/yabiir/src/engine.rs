@@ -307,6 +307,14 @@ impl Engine {
         Ok((pinned, files))
     }
 
+    /// How this store's keydir keeps its keys, as opened: a
+    /// [`KeyOrder::Sorted`](crate::KeyOrder::Sorted) store can answer
+    /// [`Engine::scan`], a hashed one can't.
+    pub fn key_order(&self) -> crate::KeyOrder {
+        self.keydir
+            .with_read(|keydir| keydir.order())
+    }
+
     /// Every live `(key, value)` pair whose key lies between `start` and
     /// `end`, in key order: one descent into the keydir and a walk, instead
     /// of a `fold` over every key. Needs a sorted keydir — a store opened with

@@ -1,332 +1,93 @@
-//! Merge (compaction): copy forward only the live entries from every
-//! non-active data file into a fresh, smaller set of data files (each with
-//! an accompanying hint file), then remove the old files. See
+//! Merge (compaction): copy the live entries of every data file into new,
+//! smaller files, each with a hint file, then remove the old files. See
 //! `docs/bitcask-implementation-plan.md` §7.
 //!
-//! ## File-ordering correctness (found by `tests/model.rs`'s proptest)
+//! ## The steps
 //!
-//! Recovery (`crate::recovery`) rebuilds the keydir by scanning files in
-//! ascending `file_id` order and letting later entries unconditionally
-//! overwrite earlier ones — "last write wins" falls out of that order being
-//! a correct proxy for chronological order. Merge output claims fresh ids
-//! from the *same* counter active-file rotation uses, so on its own that's
-//! fine. But if the active file at the moment merge starts happens to
-//! *stay* active (never crosses the rotation threshold) through and after
-//! the merge, it keeps its old, low id — while merge's output claims a
-//! *higher* one. Any further write landing in that still-active file (even
-//! well after merge returns, no concurrency required) then has a lower id
-//! than data merge already considered "older", and a future recovery scans
-//! them in the wrong order, silently resurrecting stale values.
+//! 1. **Seal.** Under the writer's lock, close the active file and reserve
+//!    the ids the output files will use ([`Writer::seal_for_merge`]). Every
+//!    data file there is at that instant is input; writes from then on go to
+//!    files with higher ids than the output's.
+//! 2. **Copy.** Read each input file in order. An entry is live if the
+//!    keydir still points at it; copy those to the output, drop the rest
+//!    (replaced values, deleted keys, tombstones).
+//! 3. **Repoint.** Once a copy is flushed, point its key at it, but only if
+//!    the key still points at the entry that was copied. A `put` or `delete`
+//!    of the key since then wins, and the copy is left unreferenced.
+//! 4. **Finish.** Fsync the output and the directory.
+//! 5. **Remove** the input files, oldest first.
 //!
-//! Fixed by having `merge` force the active file to rotate at the end if
-//! its own output ever caught up to or passed it, so the active file is
-//! always the numerically newest thing in the directory again once merge()
-//! returns — the same invariant `open()` establishes fresh every time
-//! (plan §6.4). This fully resolves the sequential case above. It does
-//! **not** fully resolve a key written *truly concurrently* with a merge
-//! that also touches that key, followed by a reopen: such a write still
-//! lands in the pre-merge active file before the forced rotation can run,
-//! so it can still end up misordered on a *subsequent* recovery, even
-//! though the CAS-repoint below keeps the live, in-memory keydir correct
-//! for the remainder of that same session. Closing that gap in general
-//! would need merge output to reuse ids freed by the files it replaces
-//! (rather than claim new ones), which in turn needs a rename-based
-//! finalization step designed carefully enough not to let a concurrent
-//! read observe a renamed-but-not-yet-repointed file under stale keydir
-//! coordinates — not implemented here; flagged as a known limitation
-//! rather than worked around with an unproven fix.
+//! Reads and writes go on throughout; only step 1 holds the writer's lock.
 //!
-//! ## Batched flushing (found by profiling `loadtest` under `cargo flamegraph`)
+//! ## Why the order of ids matters
 //!
-//! `ActiveFile::append` flushes on every call — required for `put`, since
-//! any other thread could `get()` that key immediately after `put()`
-//! returns. `MergeOutputWriter::write_live_entry` used to go through that
-//! same `append`, meaning a merge pass paid one flush syscall *per live
-//! entry it copied* — a real, measured cost (see `docs/` profiling notes)
-//! and a big share of why merge took over a second on a modest dataset.
+//! Recovery (`crate::recovery`) replays files in id order and lets a later
+//! entry replace an earlier one, so id order has to agree with the order of
+//! writes. A merge's output holds copies of *old* entries. Its ids are
+//! therefore reserved in step 1, below the id of every file written to after
+//! the merge started: a key written during the merge is replayed after the
+//! merge's copy of it, and stays the last write.
 //!
-//! Merge doesn't need that per-entry: it writes, then compare-and-swaps the
-//! keydir, and nothing requires those two steps to be immediately adjacent
-//! — only that the repoint never happens before the bytes it points at are
-//! flushed. So `MergeOutputWriter` now writes through
-//! `ActiveFile::append_buffered` (no flush) and flushes once per batch
-//! ([`MERGE_FLUSH_BATCH_SIZE`] entries, or immediately at a rotation
-//! boundary, which already fsyncs). `merge_with_hook` defers each entry's
-//! keydir repoint into a `pending` list and only drains (applies) it once
-//! `write_live_entry` reports a flush actually happened — so a key is still
-//! never repointed before its bytes are visible to a fresh read, exactly
-//! the same guarantee as before, just satisfied once per batch instead of
-//! once per entry.
+//! ## What a crash leaves
 //!
-//! This doesn't weaken crash safety: old input files are still only
-//! removed after `out.finish()` has fully flushed and fsynced every output
-//! file (§ above). Batching only changes how much of merge's own
-//! in-progress work is discarded and redone by the next attempt if the
-//! process crashes mid-merge — never the durability of data any `put`/
-//! `delete` call already returned `Ok` for.
+//! Before step 5 the input files are all still there, and whatever output
+//! exists holds copies of entries the input also has, in files that sort
+//! after it: recovery rebuilds the same keydir, and the next merge cleans
+//! up. Step 5 removes the oldest file first, so no file is removed while an
+//! older one remains: an older value can never outlive the tombstone or the
+//! newer value that replaced it. No write that returned `Ok` depends on a
+//! merge completing.
 
-use crate::commit::GroupCommit;
-use crate::datafile::{ActiveFile, DataFileSet};
+mod hint;
+mod output;
+mod repoints;
+#[cfg(test)]
+mod tests;
+
+use std::io;
+
+use crate::datafile::{self, DataFileSet, Scanned};
 use crate::error::Result;
-use crate::format::{self, Entry, EntryRead};
-use crate::keydir::SharedKeydir;
+use crate::format::Entry;
+use crate::keydir::{KeydirEntry, SharedKeydir};
 use crate::metrics::Metrics;
-use output_writer::MergeOutputWriter;
-use pending_queue::PendingQueue;
-use std::fs::{self, File};
-use std::io::{self};
-use std::path::Path;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use crate::writer::{MergeScope, Writer};
+use output::OutputWriter;
+use repoints::PendingRepoints;
 
-mod output_writer;
-mod pending_queue;
-
-/// Compact every non-active data file in `dir`. Safe to call concurrently
-/// with ongoing `put`/`get`/`delete` against the same keydir/active file —
-/// a key written concurrently with the merge is never lost (see the
-/// CAS-repoint discussion below).
+/// Compact the store. Safe to run while other threads `get`, `put` and
+/// `delete`, but not while another merge runs; the engine serializes them.
 ///
-/// `active` and `next_file_id` are the engine's own fields, passed through
-/// rather than accessed via `&Engine`, since `Engine`'s fields are private
-/// to `engine.rs` — this keeps merge's logic in its own module while still
-/// sharing the *same* active-file lock and file-id counter the engine's
-/// write path uses, which is what makes merge-output file ids never
-/// collide with concurrently-rotated active files.
-#[allow(clippy::too_many_arguments)]
-pub fn merge(
-    dir: &Path,
+/// `before_repoint` runs with a key just before merge tries to repoint it,
+/// after the copy is written and flushed. Tests write to the key there;
+/// everything else passes a no-op.
+pub(crate) fn merge(
     keydir: &SharedKeydir,
     files: &DataFileSet,
-    active: &Mutex<ActiveFile>,
-    group_commit: &GroupCommit,
-    next_file_id: &AtomicU32,
-    max_file_size: u64,
+    writer: &Writer,
     metrics: &dyn Metrics,
+    before_repoint: impl FnMut(&[u8]),
 ) -> Result<()> {
-    merge_with_repoint_hook(
-        dir,
+    let Some(scope) = seal(writer)? else {
+        return Ok(());
+    };
+    let MergeScope {
+        input_ids,
+        output_ids,
+    } = scope;
+    let mut copier = Copier {
         keydir,
         files,
-        active,
-        group_commit,
-        next_file_id,
-        max_file_size,
         metrics,
-        |_| {},
-    )
-}
-
-/// Same as [`merge`], plus a hook invoked for every live entry right after
-/// it's been copied into the merge output but *before* the keydir
-/// compare-and-swap repoint — the exact race window plan §7.3 describes.
-/// `merge` itself is just this with a no-op hook; tests use this directly
-/// (via `Engine`'s `#[cfg(test)]` forwarding method) to deterministically
-/// pause merge mid-repoint and inject a concurrent write, rather than
-/// relying on timing.
-// One parameter over clippy's default threshold, all engine fields passed
-// through individually (see the doc comment above) rather than bundled into
-// a context struct — not worth the extra indirection for a `pub(crate)`,
-// two-caller function.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn merge_with_repoint_hook(
-    dir: &Path,
-    keydir: &SharedKeydir,
-    files: &DataFileSet,
-    active: &Mutex<ActiveFile>,
-    group_commit: &GroupCommit,
-    next_file_id: &AtomicU32,
-    max_file_size: u64,
-    metrics: &dyn Metrics,
-    mut before_repoint: impl FnMut(&[u8]),
-) -> Result<()> {
-    let input_ids = collect_input_ids(dir, active)?;
-    if input_ids.is_empty() {
-        return Ok(()); // nothing to do
-    }
-
-    // 2. Iterate input files oldest -> newest, entry by entry, copying
-    //    forward only the live ones.
-    let mut writer = MergeOutputWriter::new(files, next_file_id, max_file_size)?;
-    let mut highest_output_id = writer.current_file_id();
-    // Entries written but not yet repointed: write_live_entry batches its
-    // flushes (see this module's doc comment), so a key's bytes may not be
-    // durable-to-the-OS yet even though write_live_entry already returned.
-    // Drained (repointed) whenever a flush actually happens, and once more
-    // after out.finish() for whatever's left in the final partial batch —
-    // never repointing a key before its bytes are flushed, same guarantee
-    // as before, just satisfied once per batch instead of once per entry.
-    let mut pending = PendingQueue::new();
-    let mut live_entries_copied = 0usize;
-    copy_forward_all_live_entries(
-        dir,
-        keydir,
-        &input_ids,
-        &mut writer,
-        &mut highest_output_id,
-        &mut pending,
-        &mut live_entries_copied,
-        metrics,
-        &mut before_repoint,
-    )?;
-    finish_and_apply_pending_repoints(keydir, writer, &mut pending, metrics, &mut before_repoint)?;
-
-    remove_old_input_files(dir, files, &input_ids);
-
-    restore_active_file(files, active, group_commit, next_file_id, highest_output_id)?;
-
-    metrics.record_merge_summary(input_ids.len(), live_entries_copied);
-
-    Ok(())
-}
-
-/// "Flush" phase: fsync whatever's left in the final (possibly partial)
-/// batch, then repoint the keydir for every entry that batch covers — see
-/// this module's doc comment on batched flushing for why finishing and
-/// repointing are done together, in this order.
-#[cfg_attr(
-    feature = "tracing",
-    tracing::instrument(skip_all, name = "merge::flush")
-)]
-fn finish_and_apply_pending_repoints(
-    keydir: &SharedKeydir,
-    writer: MergeOutputWriter,
-    pending: &mut PendingQueue,
-    metrics: &dyn Metrics,
-    before_repoint: &mut impl FnMut(&[u8]),
-) -> io::Result<()> {
-    writer.finish()?;
-    if !pending.is_empty() {
-        metrics.record_pending_queue_depth(pending.len());
-    }
-    apply_pending_repoints(keydir, pending, before_repoint);
-    Ok(())
-}
-
-fn restore_active_file(
-    files: &DataFileSet,
-    active: &Mutex<ActiveFile>,
-    group_commit: &GroupCommit,
-    next_file_id: &AtomicU32,
-    highest_output_id: u32,
-) -> io::Result<()> {
-    // 5. Restore "the active file is numerically newest" if merge's own
-    //    output caught up to or passed it — see the module-level doc note
-    //    above on why this matters for a future recovery's scan order. A
-    //    no-op in the common case where the active file already rotated
-    //    past highest_output_id on its own (e.g. from puts during merge).
-    {
-        let mut active_guard = active
-            .lock()
-            .expect("Active file access no loner safe (mutex poisoned); exiting");
-        if active_guard.file_id() <= highest_output_id {
-            // XXX TODO This portion does not appear to be tested
-            active_guard.sync()?;
-            group_commit.mark_all_durable();
-            let new_id = next_file_id.fetch_add(1, Ordering::SeqCst);
-            *active_guard = files.create_active(new_id)?;
-        }
+        output: OutputWriter::new(files, output_ids, writer.max_file_size()),
+        pending: PendingRepoints::default(),
+        n_copied: 0,
+        before_repoint,
     };
-    Ok(())
-}
-
-#[cfg_attr(
-    feature = "tracing",
-    tracing::instrument(skip_all, name = "merge::copy_forward")
-)]
-#[allow(clippy::too_many_arguments)]
-fn copy_forward_all_live_entries(
-    dir: &Path,
-    keydir: &SharedKeydir,
-    input_ids: &Vec<u32>,
-    writer: &mut MergeOutputWriter,
-    highest_output_id: &mut u32,
-    pending: &mut PendingQueue,
-    live_entries_copied: &mut usize,
-    metrics: &dyn Metrics,
-    mut before_repoint: &mut impl FnMut(&[u8]),
-) -> io::Result<()> {
-    for &file_id in input_ids {
-        let data_path = DataFileSet::data_path(dir, file_id);
-        copy_forward_live_file_entries(
-            keydir,
-            writer,
-            highest_output_id,
-            pending,
-            live_entries_copied,
-            metrics,
-            file_id,
-            &data_path,
-            &mut before_repoint,
-        )?;
-    }
-    Ok(())
-}
-
-#[cfg_attr(
-    feature = "tracing",
-    tracing::instrument(skip_all, name = "merge::remove_old_input_files")
-)]
-fn remove_old_input_files(dir: &Path, files: &DataFileSet, input_ids: &Vec<u32>) {
-    // 4. Remove the old input files now that nothing in the keydir points
-    //    at them anymore: every key that was live in them now points at
-    //    `out`'s files (or was already repointed elsewhere by a race);
-    //    every key that wasn't live was already pointing elsewhere and
-    //    still does.
-    for &file_id in input_ids {
-        let _ = fs::remove_file(DataFileSet::data_path(dir, file_id));
-        let _ = fs::remove_file(DataFileSet::hint_path(dir, file_id));
-        files.forget(file_id);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn copy_forward_live_file_entries(
-    keydir: &SharedKeydir,
-    writer: &mut MergeOutputWriter,
-    highest_output_id: &mut u32,
-    pending: &mut PendingQueue,
-    live_entries_copied: &mut usize,
-    metrics: &dyn Metrics,
-    file_id: u32,
-    data_path: &Path,
-    mut before_repoint: &mut impl FnMut(&[u8]),
-) -> io::Result<()> {
-    let mut max_output_id = *highest_output_id;
-    for (offset, entry) in read_all_entries(data_path)? {
-        if entry.is_tombstone() {
-            continue; // dead
-        }
-        let value_pos = offset
-            + format::HEADER_SIZE as u64
-            + entry
-                .header
-                .key_size as u64;
-        let is_live = keydir
-            .get(&entry.key)
-            .is_some_and(|kd| kd.file_id == file_id && kd.value_pos == value_pos);
-        if !is_live {
-            continue;
-        }
-
-        let (new_file_id, new_value_pos, flushed) = writer.write_live_entry(&entry)?;
-        max_output_id = max_output_id.max(writer.current_file_id());
-        *live_entries_copied += 1;
-
-        // 3. Repoint the keydir ONLY IF it still points at the exact
-        //    (file_id, offset) we just copied — if a concurrent put()
-        //    already overwrote this key while we were mid-merge, our
-        //    copy is now stale and must NOT clobber the newer entry
-        //    (plan §7.3). Queued here, applied once the batch covering
-        // //    it is actually flushed, below.
-        pending.queue(entry, file_id, new_file_id, value_pos, new_value_pos);
-
-        if flushed {
-            metrics.record_pending_queue_depth(pending.len());
-            apply_pending_repoints(keydir, pending, &mut before_repoint);
-        }
-    }
-    *highest_output_id = max_output_id; // TODO Omitting this line does not break tests, but it should.
+    copier.copy_live_entries(&input_ids)?;
+    let n_copied = copier.finish()?;
+    remove_input_files(files, &input_ids)?;
+    metrics.record_merge_summary(input_ids.len(), n_copied);
     Ok(())
 }
 
@@ -334,843 +95,134 @@ fn copy_forward_live_file_entries(
     feature = "tracing",
     tracing::instrument(skip_all, name = "merge::scan")
 )]
-fn collect_input_ids(dir: &Path, active: &Mutex<ActiveFile>) -> io::Result<Vec<u32>> {
-    // 1. Snapshot which files are eligible: everything except the current
-    //    active file at the moment merge starts. Files created by rotation
-    //    *during* the merge (concurrent puts are still allowed) are simply
-    //    not included in this pass — they'll be picked up by the next
-    //    merge. Safe and simple (plan §7.2 step 1).
-    //
-    //    Read under the active file's lock. A put/delete updates the keydir
-    //    under that same lock, before releasing it (see `Engine::append`),
-    //    so every entry in a file below `active_id_at_start` is already
-    //    published once the lock is ours, and the liveness check below can't
-    //    mistake a just-appended entry for a dead one. Writes after the lock
-    //    is released append to the active file or a later one, which aren't
-    //    inputs.
-    let active_id_at_start = active
-        .lock()
-        .expect("Active file access no loner safe (mutex poisoned); exiting")
-        .file_id();
-    let input_ids: Vec<u32> = DataFileSet::discover(dir)?
-        .into_iter()
-        .filter(|&id| id < active_id_at_start)
-        .collect();
-    Ok(input_ids)
+fn seal(writer: &Writer) -> io::Result<Option<MergeScope>> {
+    writer.seal_for_merge()
 }
 
-/// Drain and apply every queued repoint: for each, run the race-window hook
-/// then attempt the CAS. A `false` return from `cas_repoint` means a racing
-/// put already won — correct: that entry's copy stays orphaned in the new
-/// file, never pointed to, and gets cleaned up by the *next* merge pass.
-fn apply_pending_repoints(
-    keydir: &SharedKeydir,
-    pending: &mut PendingQueue,
-    before_repoint: &mut impl FnMut(&[u8]),
-) {
-    for (key, old, new) in pending.drain(..) {
-        before_repoint(&key);
-        keydir.cas_repoint(&key, old, new);
+/// Steps 2 to 4: copies live entries from the input to the output and
+/// repoints their keys.
+struct Copier<'a, H> {
+    keydir: &'a SharedKeydir,
+    files: &'a DataFileSet,
+    metrics: &'a dyn Metrics,
+    output: OutputWriter<'a>,
+    pending: PendingRepoints,
+    n_copied: usize,
+    before_repoint: H,
+}
+
+impl<H: FnMut(&[u8])> Copier<'_, H> {
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, name = "merge::copy_forward")
+    )]
+    fn copy_live_entries(&mut self, input_ids: &[u32]) -> io::Result<()> {
+        for &file_id in input_ids {
+            self.copy_live_entries_of(file_id)?;
+        }
+        Ok(())
     }
-}
 
-/// Sequentially scan `path` (an already-closed, immutable data file — never
-/// the active file) into `(offset, Entry)` pairs, tombstones included.
-/// Unlike recovery's scan, every input file here is expected to be
-/// complete, so a truncated entry is always a warning (there's no "this is
-/// the last, still-active file" exemption the way there is during
-/// recovery).
-fn read_all_entries(path: &Path) -> io::Result<Vec<(u64, Entry)>> {
-    let mut f = File::open(path)?;
-    let mut out = Vec::new();
-    let mut pos: u64 = 0;
-    loop {
-        match format::read_entry(&mut f)? {
-            None => break,
-            Some(EntryRead::Truncated) => {
-                crate::log::warn!(
-                    "warning: {} has a truncated entry at offset {pos} during merge — \
-                     unexpected for an already-closed file, possible corruption",
+    fn copy_live_entries_of(&mut self, file_id: u32) -> io::Result<()> {
+        let path = DataFileSet::data_path(
+            self.files
+                .dir(),
+            file_id,
+        );
+        for scanned in datafile::scan(&path)? {
+            match scanned? {
+                Scanned::Entry { offset, entry } => self.copy_if_live(file_id, offset, entry)?,
+                Scanned::Corrupt { offset } => crate::log::warn!(
+                    "warning: {} has a corrupt entry at offset {offset} (CRC mismatch); \
+                     merge is dropping it",
                     path.display()
-                );
-                break;
-            }
-            Some(EntryRead::Ok(entry, total_len)) => {
-                out.push((pos, entry));
-                pos += total_len;
-            }
-            Some(EntryRead::CrcMismatch { total_len }) => {
-                crate::log::warn!(
-                    "warning: {} has a corrupt entry at offset {pos} (CRC mismatch) \
-                     during merge, skipping it",
-                    path.display()
-                );
-                pos += total_len;
+                ),
+                // A file that was active when the process crashed ends this
+                // way. Recovery already stopped there; so does the copy.
+                Scanned::Truncated { .. } => {}
             }
         }
-    }
-    Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Bitcask, Engine, Options, now_unix};
-    use std::collections::HashMap;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-    /// Minimal self-cleaning temp directory — same pattern used throughout
-    /// this crate's tests.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "yabiir-merge-test-{}-{}-{}",
-                std::process::id(),
-                n,
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
+        Ok(())
     }
 
-    impl std::ops::Deref for TempDir {
-        type Target = Path;
-        fn deref(&self) -> &Path {
-            &self.0
+    /// Copy `entry`, found at `offset` of data file `file_id`, if the keydir
+    /// points at exactly that entry.
+    fn copy_if_live(&mut self, file_id: u32, offset: u64, entry: Entry) -> io::Result<()> {
+        if entry.is_tombstone() {
+            return Ok(());
         }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Raw scan of every data file currently in `dir` for how many entries
-    /// (live or tombstone) exist anywhere for `key` — used to check that
-    /// merge actually removed superseded/dead bytes from disk, not just
-    /// that the keydir looks right.
-    fn count_entries_for_key(dir: &Path, key: &[u8]) -> usize {
-        let mut count = 0;
-        for file_id in DataFileSet::discover(dir).unwrap() {
-            let path = DataFileSet::data_path(dir, file_id);
-            for (_, entry) in read_all_entries(&path).unwrap() {
-                if entry.key == key {
-                    count += 1;
-                }
-            }
-        }
-        count
-    }
-
-    #[test]
-    fn basic_compaction_keeps_only_latest_version() {
-        let dir = TempDir::new();
-        let db = Engine::open(
-            &*dir,
-            Options {
-                max_file_size: 1, // every put rotates into its own file
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        db.put(b"A", b"v1", now_unix())
-            .unwrap();
-        db.put(b"A", b"v2", now_unix())
-            .unwrap();
-        db.put(b"A", b"v3", now_unix())
-            .unwrap();
-
-        let before_ids = DataFileSet::discover(&dir).unwrap();
-        assert!(
-            before_ids.len() >= 4,
-            "expected 3 rotated files + 1 active, got {before_ids:?}"
-        );
-
-        db.merge()
-            .unwrap();
-
-        assert_eq!(
-            db.get(b"A")
-                .unwrap(),
-            Some(b"v3".to_vec())
-        );
-        assert_eq!(count_entries_for_key(&dir, b"A"), 1); // only the latest version survives anywhere on disk
-
-        let after_ids = DataFileSet::discover(&dir).unwrap();
-        for &id in &before_ids[..before_ids.len() - 1] {
-            assert!(
-                !after_ids.contains(&id),
-                "old file {id} should have been removed"
-            );
-        }
-        // The highest id after merge is always the (possibly freshly
-        // forced-rotated, per merge.rs's file-ordering correctness note)
-        // active file — an ordinary ActiveFile, not a merge output, so it
-        // has no hint file. Every *other* new id is a genuine merge output
-        // and must have one.
-        let mut new_ids: Vec<u32> = after_ids
-            .iter()
-            .copied()
-            .filter(|id| !before_ids.contains(id))
-            .collect();
-        new_ids.sort_unstable();
-        assert!(
-            !new_ids.is_empty(),
-            "expected at least one new merge-output file"
-        );
-        let merge_output_ids = &new_ids[..new_ids.len() - 1];
-        assert!(
-            !merge_output_ids.is_empty(),
-            "expected at least one new merge-output file besides the active file, got {new_ids:?}"
-        );
-        for &id in merge_output_ids {
-            assert!(
-                DataFileSet::hint_path(&dir, id).exists(),
-                "merge output file {id} missing its hint file"
-            );
-        }
-    }
-
-    /// `MergeOutputWriter`'s own rotation (`is_ready_to_rotate`) is
-    /// separate from batched flushing, and every other test in this module
-    /// uses `max_file_size: 1`, which makes rotation happen anyway as a
-    /// side effect — but none of them actually assert that merge's *output*
-    /// itself split across multiple files, only that the final values are
-    /// correct. This checks that invariant directly: with a tiny
-    /// `max_file_size`, merge's own output must rotate into more than one
-    /// data file (each with its own hint file, unlike the trailing active
-    /// file), not just happen to still produce correct results.
-    #[test]
-    fn merge_output_rotates_when_it_exceeds_max_file_size() {
-        let dir = TempDir::new();
-        let db = Engine::open(
-            &*dir,
-            Options {
-                max_file_size: 1,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        for i in 0..10u32 {
-            db.put(
-                format!("k{i}").as_bytes(),
-                format!("v{i}").as_bytes(),
-                now_unix(),
-            )
-            .unwrap();
-        }
-
-        db.merge()
-            .unwrap();
-
-        let merge_output_ids: Vec<u32> = DataFileSet::discover(&dir)
-            .unwrap()
-            .into_iter()
-            .filter(|&id| DataFileSet::hint_path(&dir, id).exists())
-            .collect();
-        assert!(
-            merge_output_ids.len() > 1,
-            "expected merge's own output to rotate into multiple files under \
-             a tiny max_file_size, got {merge_output_ids:?}"
-        );
-
-        for i in 0..10u32 {
-            assert_eq!(
-                db.get(format!("k{i}").as_bytes())
-                    .unwrap(),
-                Some(format!("v{i}").into_bytes())
-            );
-        }
-    }
-
-    /// Every other merge test in this module uses a tiny `max_file_size`,
-    /// which forces `MergeOutputWriter` to rotate (and thus fsync) on
-    /// nearly every entry — the exact confound documented in
-    /// `docs/merge-batched-flushing.typ`'s note on `benches/merge.rs`. That
-    /// means `finish()`'s specific job — flushing (and fsyncing) whatever's
-    /// left in the *final* batch when it never hit a rotation boundary or
-    /// the 256-entry threshold — has never actually been exercised with
-    /// real pending work by this test suite. Reproduced here as a real
-    /// regression test: write many keys under a small `max_file_size` (so
-    /// they land in many separate, genuinely rotated-out input files), then
-    /// reopen under the default (large) `max_file_size` before merging, so
-    /// merge's output writer has no reason to rotate and `finish()`'s own
-    /// flush is what makes the final batch's bytes visible at all. This
-    /// also exercises `restore_active_file`'s force-rotation branch (see
-    /// its "does not appear to be tested" comment) — merge's single output
-    /// file legitimately catches up to the freshly-reopened active file's
-    /// id here.
-    #[test]
-    fn merge_flushes_a_partial_final_batch_that_never_rotated() {
-        let dir = TempDir::new();
+        let value_pos = offset + entry.value_offset();
+        let old = match self
+            .keydir
+            .get(&entry.key)
         {
-            let db = Engine::open(
-                &*dir,
-                Options {
-                    max_file_size: 1, // every put rotates into its own file
-                    ..Options::default()
-                },
-            )
-            .unwrap();
-            for i in 0..20u32 {
-                db.put(
-                    format!("k{i}").as_bytes(),
-                    format!("v{i}").as_bytes(),
-                    now_unix(),
-                )
-                .unwrap();
+            Some(current) if current.file_id == file_id && current.value_pos == value_pos => {
+                current
             }
-            // dropped: ~20 separate rotated-out input files plus a tiny,
-            // never-written-to active one.
-        }
-
-        let before_ids = DataFileSet::discover(&dir).unwrap();
-        assert!(
-            before_ids.len() >= 20,
-            "expected many small rotated files, got {before_ids:?}"
-        );
-
-        // Reopen with the default, large max_file_size — merge's own
-        // output writer now has no reason to rotate for 20 small entries,
-        // so they all land in one batch that only `finish()` flushes.
-        let db = Engine::open(&*dir, Options::default()).unwrap();
-        db.merge()
-            .unwrap();
-
-        for i in 0..20u32 {
-            assert_eq!(
-                db.get(format!("k{i}").as_bytes())
-                    .unwrap(),
-                Some(format!("v{i}").into_bytes()),
-                "key k{i} missing or wrong after merge — finish()'s final-batch \
-                 flush likely didn't happen"
-            );
-        }
-
-        // Exactly one genuine merge-output file (identified by having a
-        // companion hint file, unlike the active file) confirms the output
-        // writer really did batch everything into a single un-rotated file.
-        let merge_output_ids: Vec<u32> = DataFileSet::discover(&dir)
-            .unwrap()
-            .into_iter()
-            .filter(|id| !before_ids.contains(id))
-            .filter(|&id| DataFileSet::hint_path(&dir, id).exists())
-            .collect();
-        assert_eq!(
-            merge_output_ids.len(),
-            1,
-            "expected exactly one un-rotated merge-output file, got {merge_output_ids:?}"
-        );
-
-        // Durability across a fresh reopen too, not just within the same
-        // process (would also catch finish() flushing but never syncing).
-        drop(db);
-        let reopened = Engine::open(&*dir, Options::default()).unwrap();
-        for i in 0..20u32 {
-            assert_eq!(
-                reopened
-                    .get(format!("k{i}").as_bytes())
-                    .unwrap(),
-                Some(format!("v{i}").into_bytes())
-            );
-        }
-    }
-
-    /// A `Metrics` test double recording every `record_pending_queue_depth`
-    /// and `record_merge_summary` call it sees — proves merge actually
-    /// calls into a supplied `Metrics` for these two gauges specifically,
-    /// not just the duration-based ones already covered in `engine.rs`.
-    #[derive(Default)]
-    struct GaugeRecordingMetrics {
-        pending_queue_depths: Mutex<Vec<usize>>,
-        merge_summaries: Mutex<Vec<(usize, usize)>>, // (input_files, live_entries_copied)
-    }
-
-    impl Metrics for GaugeRecordingMetrics {
-        fn record_pending_queue_depth(&self, depth: usize) {
-            self.pending_queue_depths
-                .lock()
-                .unwrap()
-                .push(depth);
-        }
-        fn record_merge_summary(&self, input_files: usize, live_entries_copied: usize) {
-            self.merge_summaries
-                .lock()
-                .unwrap()
-                .push((input_files, live_entries_copied));
-        }
-    }
-
-    #[test]
-    fn merge_reports_merge_summary_metrics() {
-        let dir = TempDir::new();
-        let metrics = Arc::new(GaugeRecordingMetrics::default());
-        let db = Engine::open(
-            &*dir,
-            Options {
-                max_file_size: 1, // every put rotates into its own file
-                metrics: Some(metrics.clone() as Arc<dyn crate::Metrics>),
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        for i in 0..10u32 {
-            db.put(
-                format!("k{i}").as_bytes(),
-                format!("v{i}").as_bytes(),
-                now_unix(),
-            )
-            .unwrap();
-        }
-
-        db.merge()
-            .unwrap();
-
-        let summaries = metrics
-            .merge_summaries
-            .lock()
-            .unwrap();
-        assert_eq!(
-            summaries.len(),
-            1,
-            "expected exactly one merge summary recorded"
-        );
-        let (input_files, live_entries_copied) = summaries[0];
-        assert_eq!(
-            input_files, 10,
-            "expected merge to report all 10 rotated-out input files"
-        );
-        assert_eq!(
-            live_entries_copied, 10,
-            "expected merge to report all 10 live entries it copied forward"
-        );
-    }
-
-    /// Same setup as `merge_flushes_a_partial_final_batch_that_never_rotated`
-    /// (many small input files, reopened under a large `max_file_size` so
-    /// merge's output writer never rotates) — specifically so all 20 live
-    /// entries land in *one* batch that only `finish()`'s final flush
-    /// covers, and `record_pending_queue_depth` gets one real, multi-entry
-    /// sample instead of a string of 1s (which `max_file_size: 1` would
-    /// produce, since every entry would rotate its own batch of size 1).
-    #[test]
-    fn merge_reports_pending_queue_depth_for_the_final_batch() {
-        let dir = TempDir::new();
-        {
-            let db = Engine::open(
-                &*dir,
-                Options {
-                    max_file_size: 1,
-                    ..Options::default()
-                },
-            )
-            .unwrap();
-            for i in 0..20u32 {
-                db.put(
-                    format!("k{i}").as_bytes(),
-                    format!("v{i}").as_bytes(),
-                    now_unix(),
-                )
-                .unwrap();
-            }
-        }
-
-        let metrics = Arc::new(GaugeRecordingMetrics::default());
-        let db = Engine::open(
-            &*dir,
-            Options {
-                metrics: Some(metrics.clone() as Arc<dyn crate::Metrics>),
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        db.merge()
-            .unwrap();
-
-        let depths = metrics
-            .pending_queue_depths
-            .lock()
-            .unwrap();
-        assert_eq!(
-            depths.as_slice(),
-            &[20],
-            "expected exactly one pending-queue-depth sample, for the whole \
-             un-rotated final batch"
-        );
-    }
-
-    /// `read_all_entries`'s `pos` bookkeeping is purely derived (the actual
-    /// file reading is sequential via the shared `File` handle, not
-    /// seek-based) — but a *live* entry after a corrupt (CRC-mismatch) one
-    /// in the *same* input file depends on it being correct, since
-    /// `copy_forward_live_file_entries` uses it to compute that entry's
-    /// `value_pos` for the keydir liveness check. Get this wrong and a live
-    /// key positioned after a corrupt entry in the same file is wrongly
-    /// treated as dead, silently dropped by merge, and left pointing at an
-    /// input file that merge then deletes.
-    #[test]
-    fn merge_correctly_resumes_scanning_after_a_corrupt_entry_in_an_input_file() {
-        let dir = TempDir::new();
-        {
-            let db = Engine::open(&*dir, Options::default()).unwrap();
-            db.put(b"a", b"a-v1", now_unix())
-                .unwrap();
-            db.put(b"b", b"b-v1", now_unix())
-                .unwrap();
-            db.put(b"c", b"c-v1", now_unix())
-                .unwrap();
-            // all three land in one file (file 0), which becomes an
-            // ordinary rotated-out (merge-eligible) file once reopened.
-        }
-
-        // Corrupt "b"'s value bytes in file 0 — a CRC mismatch, but leaves
-        // "c" (which comes right after it in the same file) intact.
-        let path = DataFileSet::data_path(&dir, 0);
-        let mut bytes = fs::read(&path).unwrap();
-        let corrupt_at = bytes
-            .windows(4)
-            .position(|w| w == b"b-v1")
-            .unwrap();
-        bytes[corrupt_at] ^= 0xFF;
-        fs::write(&path, &bytes).unwrap();
-
-        // Reopening starts a fresh active file (id 1); file 0's recovery
-        // scan (a separate code path from merge's own) already correctly
-        // drops "b" and keeps "c" here.
-        let db = Engine::open(&*dir, Options::default()).unwrap();
-        assert_eq!(
-            db.get(b"a")
-                .unwrap(),
-            Some(b"a-v1".to_vec())
-        );
-        assert_eq!(
-            db.get(b"b")
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            db.get(b"c")
-                .unwrap(),
-            Some(b"c-v1".to_vec())
-        );
-
-        db.merge()
-            .unwrap();
-
-        assert_eq!(
-            db.get(b"a")
-                .unwrap(),
-            Some(b"a-v1".to_vec()),
-            "a (before the corrupt entry) must survive merge"
-        );
-        assert_eq!(
-            db.get(b"b")
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            db.get(b"c")
-                .unwrap(),
-            Some(b"c-v1".to_vec()),
-            "c (after the corrupt entry, same input file) must survive merge"
-        );
-    }
-
-    #[test]
-    fn tombstone_reclamation() {
-        let dir = TempDir::new();
-        let db = Engine::open(
-            &*dir,
-            Options {
-                max_file_size: 1,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        db.put(b"B", b"v", now_unix())
-            .unwrap();
-        db.delete(b"B", now_unix())
-            .unwrap();
-
-        db.merge()
-            .unwrap();
-
-        assert_eq!(
-            db.get(b"B")
-                .unwrap(),
-            None
-        );
-        assert_eq!(count_entries_for_key(&dir, b"B"), 0); // no trace, live or tombstone
-    }
-
-    #[test]
-    fn merge_does_not_touch_the_active_file() {
-        let dir = TempDir::new();
-        let db = Engine::open(
-            &*dir,
-            Options {
-                max_file_size: 40,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        for i in 0..30u32 {
-            db.put(
-                format!("k{i}").as_bytes(),
-                format!("v{i}").as_bytes(),
-                now_unix(),
-            )
-            .unwrap();
-        }
-
-        let before_ids = DataFileSet::discover(&dir).unwrap();
-        assert!(
-            before_ids.len() > 2,
-            "test needs multiple rotated files, got {before_ids:?}"
-        );
-        let active_id = *before_ids
-            .last()
-            .unwrap();
-        let an_old_id = before_ids[0];
-
-        db.merge()
-            .unwrap();
-
-        let after_ids = DataFileSet::discover(&dir).unwrap();
-        assert!(
-            after_ids.contains(&active_id),
-            "active file must survive merge untouched"
-        );
-        assert!(
-            !after_ids.contains(&an_old_id),
-            "an old rotated file should have been merged away"
-        );
-
-        for i in 0..30u32 {
-            assert_eq!(
-                db.get(format!("k{i}").as_bytes())
-                    .unwrap(),
-                Some(format!("v{i}").into_bytes())
-            );
-        }
-    }
-
-    #[test]
-    fn hint_files_match_full_scan_recovery_post_merge() {
-        let dir = TempDir::new();
-        let db = Engine::open(
-            &*dir,
-            Options {
-                max_file_size: 1,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        db.put(b"a", b"1", now_unix())
-            .unwrap();
-        db.put(b"a", b"2", now_unix())
-            .unwrap();
-        db.put(b"b", b"3", now_unix())
-            .unwrap();
-        db.delete(b"b", now_unix())
-            .unwrap();
-        db.put(b"c", b"4", now_unix())
-            .unwrap();
-        db.merge()
-            .unwrap();
-        db.sync()
-            .unwrap();
-
-        let mut expected_keys = db
-            .list_keys()
-            .unwrap();
-        expected_keys.sort();
-
-        // A fresh, independent, *read-only* open (a second read_write
-        // handle on the same directory is correctly refused by the new
-        // single-writer lock — plan §8.1 — while `db` is still open) — the
-        // keydir is rebuilt purely by recovery, hint-based here since merge
-        // just wrote hint files.
-        let reopened = Engine::open(
-            &*dir,
-            Options {
-                is_read_write: false,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        let mut got_keys = reopened
-            .list_keys()
-            .unwrap();
-        got_keys.sort();
-        assert_eq!(got_keys, expected_keys);
-        for key in &got_keys {
-            assert_eq!(
-                reopened
-                    .get(key)
-                    .unwrap(),
-                db.get(key)
-                    .unwrap()
-            );
-        }
-    }
-
-    #[test]
-    fn repeated_merges_are_idempotent() {
-        let dir = TempDir::new();
-        let db = Engine::open(
-            &*dir,
-            Options {
-                max_file_size: 1,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        db.put(b"a", b"1", now_unix())
-            .unwrap();
-        db.put(b"a", b"2", now_unix())
-            .unwrap();
-        db.put(b"b", b"3", now_unix())
-            .unwrap();
-
-        db.merge()
-            .unwrap();
-        assert_eq!(
-            db.get(b"a")
-                .unwrap(),
-            Some(b"2".to_vec())
-        );
-        assert_eq!(
-            db.get(b"b")
-                .unwrap(),
-            Some(b"3".to_vec())
-        );
-
-        db.merge()
-            .unwrap(); // merging an already-merged, unchanged datastore again
-        assert_eq!(
-            db.get(b"a")
-                .unwrap(),
-            Some(b"2".to_vec())
-        );
-        assert_eq!(
-            db.get(b"b")
-                .unwrap(),
-            Some(b"3".to_vec())
-        );
-    }
-
-    /// Plan §7.5's stress test: one thread merging in a loop while several
-    /// others concurrently put/delete/get on a small, overlapping keyspace,
-    /// with every put/delete mirrored (under one shared lock, so the
-    /// comparison at the end is valid) into a plain `HashMap` reference
-    /// model; the real engine's final state must match it exactly.
-    #[test]
-    fn stress_concurrent_put_delete_and_merge_match_reference_model() {
-        let dir = TempDir::new();
-        let db = Arc::new(
-            Engine::open(
-                &*dir,
-                Options {
-                    max_file_size: 256,
-                    ..Options::default()
-                },
-            )
-            .unwrap(),
-        );
-        let reference = Arc::new(Mutex::new(HashMap::<Vec<u8>, Vec<u8>>::new()));
-        let keys: Vec<Vec<u8>> = (0..8u32)
-            .map(|i| format!("k{i}").into_bytes())
-            .collect();
-        let deadline = Instant::now() + Duration::from_millis(500);
-
-        let merger = {
-            let db = Arc::clone(&db);
-            std::thread::spawn(move || {
-                while Instant::now() < deadline {
-                    db.merge()
-                        .unwrap();
-                }
-            })
+            _ => return Ok(()),
         };
 
-        let workers: Vec<_> = (0..4u64)
-            .map(|worker_id| {
-                let db = Arc::clone(&db);
-                let reference = Arc::clone(&reference);
-                let keys = keys.clone();
-                std::thread::spawn(move || {
-                    // Small xorshift-style PRNG — avoids pulling in a `rand`
-                    // dependency just for test-input shuffling.
-                    let mut state = 0x9E3779B97F4A7C15u64.wrapping_add(worker_id);
-                    while Instant::now() < deadline {
-                        state = state
-                            .wrapping_mul(6364136223846793005)
-                            .wrapping_add(1);
-                        let key = &keys[(state as usize) % keys.len()];
-                        let op = (state >> 32) % 3;
-                        // Hold the reference lock across both the real
-                        // mutation and the model update, so the two never
-                        // drift apart and the final comparison is valid.
-                        let mut reference = reference
-                            .lock()
-                            .unwrap();
-                        match op {
-                            0 => {
-                                let value = format!("v{state}").into_bytes();
-                                db.put(key, &value, now_unix())
-                                    .unwrap();
-                                reference.insert(key.clone(), value);
-                            }
-                            1 => {
-                                db.delete(key, now_unix())
-                                    .unwrap();
-                                reference.remove(key.as_slice());
-                            }
-                            _ => {
-                                db.get(key)
-                                    .unwrap(); // extra concurrent read pressure
-                            }
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        for w in workers {
-            w.join()
-                .unwrap();
+        let written = self
+            .output
+            .write(&entry)?;
+        let new = KeydirEntry {
+            file_id: written.file_id,
+            value_pos: written.value_pos,
+            ..old
+        };
+        self.pending
+            .push(entry.key, old, new);
+        self.n_copied += 1;
+        if written.is_flushed {
+            self.apply_pending_repoints();
         }
-        merger
-            .join()
-            .unwrap();
-
-        let reference = reference
-            .lock()
-            .unwrap();
-        for key in &keys {
-            assert_eq!(
-                db.get(key)
-                    .unwrap(),
-                reference
-                    .get(key.as_slice())
-                    .cloned(),
-                "mismatch for {:?}",
-                String::from_utf8_lossy(key)
-            );
-        }
+        Ok(())
     }
+
+    /// Repoint the keys whose copies have been flushed.
+    fn apply_pending_repoints(&mut self) {
+        if self
+            .pending
+            .len()
+            > 0
+        {
+            self.metrics
+                .record_pending_queue_depth(
+                    self.pending
+                        .len(),
+                );
+        }
+        self.pending
+            .apply(self.keydir, &mut self.before_repoint);
+    }
+
+    /// Make the output durable, repoint the last batch, and return how many
+    /// entries were copied.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, name = "merge::flush")
+    )]
+    fn finish(mut self) -> io::Result<usize> {
+        // The last batch is repointed only after `finish` has flushed it.
+        self.output
+            .finish()?;
+        self.apply_pending_repoints();
+        Ok(self.n_copied)
+    }
+}
+
+/// Step 5. Nothing in the keydir points into the input any more: a key that
+/// was live there points at the output now, or at a newer write.
+///
+/// Oldest first, stopping at the first failure, so that a file is never
+/// removed while an older one remains (see the module docs).
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(skip_all, name = "merge::remove_old_input_files")
+)]
+fn remove_input_files(files: &DataFileSet, input_ids: &[u32]) -> io::Result<()> {
+    for &file_id in input_ids {
+        files.remove(file_id)?;
+    }
+    files.sync_dir()
 }

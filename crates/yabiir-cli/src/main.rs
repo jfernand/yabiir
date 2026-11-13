@@ -1,14 +1,24 @@
+//! `kv`: one command against a yabiir store.
+//!
+//! ```text
+//! kv <dir> add <key> <value>
+//! kv <dir> get <key>
+//! kv <dir> rm <key>
+//! kv <dir> list
+//! kv <dir> merge
+//! ```
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use yabiir::{Bitcask, Engine, Options, now_unix};
 
-/// Bitcask CLI: point it at a datastore directory and issue one command.
+/// Point it at a store's directory and give one command.
 #[derive(Parser)]
-#[command(name = "e", about = "A Bitcask key/value store CLI")]
+#[command(name = "kv", about = "A command-line front end to a yabiir store")]
 struct Args {
-    /// Path to the Bitcask datastore directory (created if it doesn't exist).
+    /// The store's directory. Commands that write create it if it is missing.
     dir: PathBuf,
 
     #[command(subcommand)]
@@ -25,8 +35,8 @@ enum Command {
     Rm { key: String },
     /// List all keys.
     List,
-    /// Compact non-active data files, reclaiming space from superseded
-    /// values and deleted keys.
+    /// Compact the store, reclaiming the space of replaced values and
+    /// deleted keys.
     Merge,
 }
 
@@ -38,13 +48,16 @@ fn main() -> ExitCode {
     })
 }
 
-/// Each invocation of this CLI is a fresh process: it opens the datastore
-/// (recovering the keydir from any existing data/hint files —
-/// `docs/bitcask-implementation-plan.md` §6), does exactly one operation,
-/// and exits — so an `add` followed by a separate `get` invocation does
-/// find the key.
+/// Run one command. Each invocation is its own process: it opens the store
+/// (which rebuilds the keydir from the files), does one thing, and closes
+/// it. Commands that only read open the store read-only, so they take no
+/// lock and can run beside a writer.
 fn run(args: Args) -> yabiir::Result<ExitCode> {
-    let db = Engine::open(&args.dir, Options::default())?;
+    let options = match args.command {
+        Command::Get { .. } | Command::List => Options::default().read_only(),
+        Command::Add { .. } | Command::Rm { .. } | Command::Merge => Options::default(),
+    };
+    let db = Engine::open(&args.dir, options)?;
 
     let code = match args.command {
         Command::Add { key, value } => {
@@ -66,7 +79,6 @@ fn run(args: Args) -> yabiir::Result<ExitCode> {
             ExitCode::SUCCESS
         }
         Command::List => {
-            let db = Engine::open(&args.dir, Options::default().read_only())?;
             for key in db.list_keys()? {
                 println!("{}", String::from_utf8_lossy(&key));
             }

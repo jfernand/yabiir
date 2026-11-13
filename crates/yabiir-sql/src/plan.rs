@@ -12,7 +12,7 @@ use std::fmt;
 use std::ops::Bound;
 
 use super::ast::{Condition, Fields, Literal, Select};
-use crate::{Bitcask, Engine, KeyOrder, Result};
+use yabiir::{Bitcask, Engine, KeyOrder, Result};
 
 /// A tree of operators that answers one query against one store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,32 +184,10 @@ impl fmt::Display for Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Options;
-    use crate::sql::parse;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "yabiir-sql-test-{}-{}",
-                std::process::id(),
-                COUNTER.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::parse;
+    use std::path::Path;
+    use yabiir::Options;
+    use yabiir_testutil::TempDir;
 
     const COMPUTERS: [(&str, &str); 5] = [
         ("apple-ii", "1977"),
@@ -230,7 +208,7 @@ mod tests {
         .unwrap();
         for (key, value) in COMPUTERS {
             store
-                .put(key.as_bytes(), value.as_bytes(), crate::now_unix())
+                .put(key.as_bytes(), value.as_bytes(), yabiir::now_unix())
                 .unwrap();
         }
         store
@@ -302,7 +280,7 @@ mod tests {
         ];
         for order in [KeyOrder::Hashed, KeyOrder::Sorted] {
             let dir = TempDir::new();
-            let store = store(&dir.0, order);
+            let store = store(&dir, order);
             for text in queries {
                 let select = parse(text).unwrap();
                 let got = execute(&plan(&select, order), &store).unwrap();
@@ -349,7 +327,7 @@ mod tests {
     #[test]
     fn a_range_scan_returns_its_rows_in_key_order() {
         let dir = TempDir::new();
-        let store = store(&dir.0, KeyOrder::Sorted);
+        let store = store(&dir, KeyOrder::Sorted);
         let got = execute(
             &planned("SELECT key WHERE key BETWEEN 'a' AND 'j'", KeyOrder::Sorted),
             &store,

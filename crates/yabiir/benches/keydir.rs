@@ -1,4 +1,4 @@
-//! Benchmarks for the in-memory keydir index (`src/keydir.rs`). See
+//! Benchmarks for the in-memory keydir index (`src/keydir/`). See
 //! `docs/bitcask-implementation-plan.md` §2.
 //!
 //! Run with: `cargo bench --bench keydir`

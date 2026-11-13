@@ -3,7 +3,7 @@
 //! `select distinct VALUE  where KEY between 'a' and 'c'` and
 //! `SELECT DISTINCT value WHERE key BETWEEN 'a' AND 'c'` are different text
 //! and the same tree. The tree says nothing about how to answer the query;
-//! that's the planner's job ([`super::plan`]).
+//! that's the planner's job ([`crate::plan()`]).
 
 use std::fmt;
 

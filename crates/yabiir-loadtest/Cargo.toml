@@ -1,0 +1,16 @@
+[package]
+name = "yabiir-loadtest"
+version = "0.1.0"
+edition.workspace = true
+description = "loadtest: a mixed get/put/delete load generator for a yabiir store"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "loadtest"
+path = "src/main.rs"
+
+[dependencies]
+yabiir.workspace = true
+clap.workspace = true

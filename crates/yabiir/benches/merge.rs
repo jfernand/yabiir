@@ -1,4 +1,4 @@
-//! Benchmarks for merge/compaction (`src/merge.rs`). See
+//! Benchmarks for merge/compaction (`src/merge/`). See
 //! `docs/bitcask-implementation-plan.md` §7.
 //!
 //! Real filesystem I/O throughout: each iteration builds a directory of
@@ -8,47 +8,9 @@
 //! under direct control here), then times `Engine::merge()` compacting it.
 //! Run with: `cargo bench --bench merge`
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use yabiir::{Bitcask, Engine, Options, now_unix};
-
-/// Minimal self-cleaning temp directory — same pattern used throughout this
-/// crate's own tests and other benches.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "yabiir-merge-bench-{}-{}-{}",
-            std::process::id(),
-            n,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl std::ops::Deref for TempDir {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use yabiir_testutil::TempDir;
 
 /// Write `versions_per_key` sequential updates to each of `num_keys`
 /// distinct keys (interleaved: all keys' v0, then all keys' v1, ...), with

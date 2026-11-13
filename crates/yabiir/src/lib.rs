@@ -1,41 +1,73 @@
+//! yabiir: yet another Bitcask implementation, in Rust.
+//!
+//! A Bitcask store is a directory of append-only data files and an in-memory
+//! index, the keydir, from each key to where its newest value is on disk.
+//! Open one with [`Engine::open`](Bitcask::open) and use it through the
+//! [`Bitcask`] trait:
+//!
+//! ```
+//! use yabiir::{Bitcask, Engine, Options, now_unix};
+//!
+//! # let dir = std::env::temp_dir().join(format!("yabiir-doctest-{}", std::process::id()));
+//! let store = Engine::open(&dir, Options::default())?;
+//! store.put(b"name", b"yabiir", now_unix())?;
+//! assert_eq!(store.get(b"name")?, Some(b"yabiir".to_vec()));
+//! store.delete(b"name", now_unix())?;
+//! assert_eq!(store.get(b"name")?, None);
+//! store.close()?;
+//! # std::fs::remove_dir_all(&dir).unwrap();
+//! # Ok::<(), yabiir::Error>(())
+//! ```
+//!
+//! How the pieces fit, bottom up:
+//!
+//! - `format`: the bytes of a data-file entry and of a hint-file record.
+//! - `datafile`: the files; appending to the active one, reading any of them.
+//! - `keydir`: the in-memory index.
+//! - `writer`: the single writer, which appends and rotates.
+//! - `commit`: group commit, for `sync_on_put`.
+//! - `recovery`: rebuilding the keydir at open.
+//! - `merge`: compaction.
+//! - `engine`: [`Engine`], which puts them behind the [`Bitcask`] API.
+
 mod api;
 mod commit;
-// `datafile`, `format`, and `keydir` are internal building blocks, not
-// stable public API — made `pub` only so `benches/*.rs` (a separate crate)
-// can reach them directly instead of duplicating their code.
-pub mod datafile;
 mod engine;
 mod error;
-pub mod format;
-pub mod keydir;
 mod lock;
 mod log;
 mod merge;
 mod metrics;
 mod recovery;
-// A small SQL front end — parser, AST, planner, executor — over one store;
-// documented in src/sql/mod.rs.
-#[cfg(feature = "sql")]
-pub mod sql;
+mod sync;
+#[cfg(test)]
+mod testutil;
+mod writer;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-// The actual public API: everything a consumer of this crate (e.g.
-// src/bin/e.rs) needs to open and use a Bitcask datastore, re-exported flat
-// at the crate root rather than requiring callers to know the internal
-// module layout.
+// Internal building blocks, not part of the supported API: public only so
+// that `benches/` (a separate crate) can measure them directly.
+#[doc(hidden)]
+pub mod datafile;
+#[doc(hidden)]
+pub mod format;
+#[doc(hidden)]
+pub mod keydir;
+
 pub use api::{Bitcask, KeyOrder, Options};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use metrics::Metrics;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The current time as seconds since the Unix epoch, the timestamp `put` and
+/// `delete` take.
 pub fn now_unix() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("the system clock is set before 1970")
         .as_secs() as u32
 }
 
-// This test is BS; it is just here to satisfy mutant testing.
 #[cfg(test)]
 mod tests {
     use super::*;

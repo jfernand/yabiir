@@ -7,8 +7,7 @@
 //!        [WHERE key = 'k' | WHERE key BETWEEN 'low' AND 'high']
 //! ```
 //!
-//! There is one table, the store, so there is no `FROM`. Behind the `sql`
-//! feature.
+//! There is one table, the store, so there is no `FROM`.
 
 mod ast;
 mod parse;
@@ -20,13 +19,13 @@ pub use ast::{Condition, Fields, Select};
 pub use parse::{ParseError, parse};
 pub use plan::{Plan, Rows, execute, plan};
 
-use crate::Engine;
+use yabiir::Engine;
 
 /// Why a query failed: it didn't parse, or the store failed answering it.
 #[derive(Debug)]
 pub enum Error {
     Parse(ParseError),
-    Store(crate::Error),
+    Store(yabiir::Error),
 }
 
 impl fmt::Display for Error {
@@ -53,8 +52,8 @@ impl From<ParseError> for Error {
     }
 }
 
-impl From<crate::Error> for Error {
-    fn from(e: crate::Error) -> Self {
+impl From<yabiir::Error> for Error {
+    fn from(e: yabiir::Error) -> Self {
         Error::Store(e)
     }
 }

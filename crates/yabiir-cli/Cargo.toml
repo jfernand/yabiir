@@ -1,0 +1,16 @@
+[package]
+name = "yabiir-cli"
+version = "0.1.0"
+edition.workspace = true
+description = "kv: a command-line front end to a yabiir store"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "kv"
+path = "src/main.rs"
+
+[dependencies]
+yabiir.workspace = true
+clap.workspace = true

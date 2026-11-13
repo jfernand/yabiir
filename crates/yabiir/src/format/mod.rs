@@ -60,6 +60,9 @@ const KEYSIZE_MASK: u32 = !TOMBSTONE_BIT;
 /// the top bit of `ksz` for the tombstone flag.
 pub const MAX_KEY_LEN: u32 = KEYSIZE_MASK;
 
+/// Largest value length the header's 32-bit `value_sz` field can hold.
+pub const MAX_VALUE_LEN: u32 = u32::MAX;
+
 /// Header fields shared by both the data-file entry format and the
 /// hint-file record format (everything except the CRC and, for hints, the
 /// `value_pos` that only a hint record carries).

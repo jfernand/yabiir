@@ -2574,15 +2574,31 @@ name = "yabiir"
 version = "0.6.0"
 dependencies = [
  "ahash",
+ "crc32fast",
+ "criterion",
+ "fs2",
+ "proptest",
+ "tracing",
+ "yabiir-testutil",
+]
+
+[[package]]
+name = "yabiir-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "yabiir",
+]
+
+[[package]]
+name = "yabiir-examples"
+version = "0.1.0"
+dependencies = [
  "atrium-api",
  "chrono",
  "clap",
- "crc32fast",
- "criterion",
  "crossterm 0.29.0",
- "fs2",
  "futures-util",
- "proptest",
  "ratatui",
  "rs-car",
  "rustls",
@@ -2590,8 +2606,28 @@ dependencies = [
  "serde_ipld_dagcbor 0.7.0",
  "tokio",
  "tokio-tungstenite",
- "tracing",
+ "yabiir",
 ]
+
+[[package]]
+name = "yabiir-loadtest"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "yabiir",
+]
+
+[[package]]
+name = "yabiir-sql"
+version = "0.1.0"
+dependencies = [
+ "yabiir",
+ "yabiir-testutil",
+]
+
+[[package]]
+name = "yabiir-testutil"
+version = "0.1.0"
 
 [[package]]
 name = "zerocopy"

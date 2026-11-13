@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Capture a flamegraph of src/bin/loadtest.rs under a mixed get/put/delete
-# workload with merge running concurrently. See src/bin/loadtest.rs's own
+# Capture a flamegraph of crates/yabiir-loadtest under a mixed get/put/delete
+# workload with merge running concurrently. See crates/yabiir-loadtest's own
 # doc comment for the full flag list.
 #
 # Usage: scripts/flamegraph.sh [extra loadtest args...]

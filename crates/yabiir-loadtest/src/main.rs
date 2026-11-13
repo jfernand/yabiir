@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -241,36 +241,56 @@ fn print_window(window: &[Sample], elapsed_secs: f64) {
     }
 }
 
+/// What the worker, merge and reporting threads share during a run.
+struct Run {
+    db: Engine,
+    /// Samples recorded since the reporter last drained them.
+    samples: Mutex<Vec<Sample>>,
+    /// Set when the run is over: every loop checks it and returns.
+    stop: AtomicBool,
+    /// Whether samples are being kept: false during warmup.
+    recording: AtomicBool,
+    start: Instant,
+}
+
+impl Run {
+    fn elapsed_secs(&self) -> f64 {
+        self.start
+            .elapsed()
+            .as_secs_f64()
+    }
+
+    /// Queue `batch`, emptying it.
+    fn record(&self, batch: &mut Vec<Sample>) {
+        self.samples
+            .lock()
+            .unwrap()
+            .append(batch);
+    }
+
+    /// A sample for an operation of `kind` that started at `op_start` and
+    /// has just finished.
+    fn sample(&self, kind: OpKind, op_start: Instant) -> Sample {
+        let latency_ns = op_start
+            .elapsed()
+            .as_nanos() as u64;
+        let started_at = op_start
+            .duration_since(self.start)
+            .as_secs_f64();
+        (started_at, kind, latency_ns)
+    }
+}
+
 fn main() {
     let args = Args::parse();
-
-    if !args.keep {
-        let _ = std::fs::remove_dir_all(&args.dir);
-    }
-
-    let db = Arc::new(
-        Engine::open(
-            &args.dir,
-            Options {
-                max_file_size: args.max_file_size,
-                should_sync_on_put: args.sync_on_put,
-                key_order: if args.sorted_keydir {
-                    KeyOrder::Sorted
-                } else {
-                    KeyOrder::Hashed
-                },
-                ..Options::default()
-            },
-        )
-        .expect("failed to open datastore"),
+    assert!(
+        args.read_weight + args.write_weight + args.delete_weight > 0,
+        "at least one op weight must be nonzero"
     );
 
-    eprintln!("pre-populating {} keys...", args.keys);
+    let db = open_store(&args);
     let value = vec![0xABu8; args.value_size];
-    for k in 0..args.keys {
-        db.put(&key_bytes(k), &value, now_unix())
-            .unwrap();
-    }
+    prepopulate(&db, args.keys, &value);
     eprintln!(
         "done. running {} threads for {}s (+{}s warmup), merge={}",
         args.threads,
@@ -281,176 +301,201 @@ fn main() {
             .unwrap_or_else(|| "disabled".to_string())
     );
 
-    let total_weight = (args.read_weight + args.write_weight + args.delete_weight) as u64;
-    assert!(total_weight > 0, "at least one op weight must be nonzero");
-
-    let samples: Arc<Mutex<Vec<Sample>>> = Arc::new(Mutex::new(Vec::new()));
-    let stop = Arc::new(AtomicBool::new(false));
-    let recording = Arc::new(AtomicBool::new(args.warmup_secs == 0));
-    let overall_start = Instant::now();
-
-    let mut worker_handles = Vec::new();
-    for worker_id in 0..args.threads {
-        let db = Arc::clone(&db);
-        let samples = Arc::clone(&samples);
-        let stop = Arc::clone(&stop);
-        let recording = Arc::clone(&recording);
-        let value = value.clone();
-        let (keys, read_w, write_w) =
-            (args.keys, args.read_weight as u64, args.write_weight as u64);
-
-        worker_handles.push(std::thread::spawn(move || {
-            let mut rng = Rng::new(0x9E3779B97F4A7C15u64.wrapping_add(worker_id as u64 + 1));
-            let mut local: Vec<Sample> = Vec::with_capacity(64);
-            while !stop.load(Ordering::Relaxed) {
-                let k = key_bytes(rng.next_u64() % keys);
-                let pick = rng.next_u64() % total_weight;
-
-                let start = Instant::now();
-                let kind = if pick < read_w {
-                    db.get(&k)
-                        .unwrap();
-                    OpKind::Get
-                } else if pick < read_w + write_w {
-                    db.put(&k, &value, now_unix())
-                        .unwrap();
-                    OpKind::Put
-                } else {
-                    db.delete(&k, now_unix())
-                        .unwrap();
-                    OpKind::Delete
-                };
-                let latency_ns = start
-                    .elapsed()
-                    .as_nanos() as u64;
-
-                if recording.load(Ordering::Relaxed) {
-                    local.push((
-                        start
-                            .duration_since(overall_start)
-                            .as_secs_f64(),
-                        kind,
-                        latency_ns,
-                    ));
-                    if local.len() >= 64 {
-                        samples
-                            .lock()
-                            .unwrap()
-                            .extend(local.drain(..));
-                    }
-                }
-            }
-            if !local.is_empty() {
-                samples
-                    .lock()
-                    .unwrap()
-                    .extend(local.drain(..));
-            }
-        }));
-    }
-
-    let merge_handle = args
-        .merge_interval_secs
-        .map(|interval_secs| {
-            let db = Arc::clone(&db);
-            let samples = Arc::clone(&samples);
-            let stop = Arc::clone(&stop);
-            let recording = Arc::clone(&recording);
-            std::thread::spawn(move || {
-                let interval = Duration::from_secs(interval_secs);
-                while !sleep_or_stop(interval, &stop) {
-                    let start = Instant::now();
-                    db.merge()
-                        .unwrap();
-                    let latency_ns = start
-                        .elapsed()
-                        .as_nanos() as u64;
-                    eprintln!("[merge] took {}", fmt_ns(latency_ns));
-                    if recording.load(Ordering::Relaxed) {
-                        samples
-                            .lock()
-                            .unwrap()
-                            .push((
-                                start
-                                    .duration_since(overall_start)
-                                    .as_secs_f64(),
-                                OpKind::Merge,
-                                latency_ns,
-                            ));
-                    }
-                }
-            })
-        });
-
-    let total_run = Duration::from_secs(args.warmup_secs + args.duration_secs);
+    let run = Run {
+        db,
+        samples: Mutex::new(Vec::new()),
+        stop: AtomicBool::new(false),
+        recording: AtomicBool::new(args.warmup_secs == 0),
+        start: Instant::now(),
+    };
     let mut all_samples: HashMap<OpKind, Vec<u64>> = HashMap::new();
-    let mut csv: Option<BufWriter<File>> = args
-        .csv
-        .as_ref()
-        .map(|path| {
-            let mut w = BufWriter::new(File::create(path).expect("failed to create --csv file"));
-            writeln!(w, "elapsed_secs,op,latency_ns").unwrap();
-            w
-        });
-    let mut warmup_announced = args.warmup_secs == 0;
+    let mut csv = open_csv(&args);
 
-    println!(
-        "{:>9} {:>7} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "elapsed", "op", "count", "p50", "p90", "p99", "p99.9", "max"
-    );
-
-    while overall_start.elapsed() < total_run {
-        let remaining = total_run.saturating_sub(overall_start.elapsed());
-        std::thread::sleep(
-            Duration::from_secs(
-                args.report_interval_secs
-                    .max(1),
-            )
-            .min(remaining.max(Duration::from_millis(1))),
-        );
-
-        if !warmup_announced && overall_start.elapsed() >= Duration::from_secs(args.warmup_secs) {
-            recording.store(true, Ordering::Relaxed);
-            warmup_announced = true;
-            eprintln!("--- warmup complete, recording ---");
+    std::thread::scope(|scope| {
+        for worker_id in 0..args.threads {
+            let (run, args, value) = (&run, &args, &value);
+            scope.spawn(move || work(run, args, value, worker_id as u64));
         }
+        if let Some(interval_secs) = args.merge_interval_secs {
+            let run = &run;
+            scope.spawn(move || merge_periodically(run, Duration::from_secs(interval_secs)));
+        }
+        report_until_done(&run, &args, &mut all_samples, &mut csv);
+        run.stop
+            .store(true, Ordering::Relaxed);
+    });
 
-        let window = drain_samples(&samples, &mut all_samples, &mut csv);
-        print_window(
-            &window,
-            overall_start
-                .elapsed()
-                .as_secs_f64(),
-        );
-    }
-
-    stop.store(true, Ordering::Relaxed);
-    for h in worker_handles {
-        h.join()
-            .unwrap();
-    }
-    if let Some(h) = merge_handle {
-        h.join()
-            .unwrap();
-    }
-    // One more drain: a worker's or the merge thread's final flush (its
-    // trailing local buffer, or a merge call still in flight when the
-    // reporting loop above took its last sleep) can land after that loop's
-    // last drain but before these joins complete — without this, that
-    // data (which, for a multi-second merge, can be the whole thing)
-    // would silently never make it into the CSV or the final summary.
-    let window = drain_samples(&samples, &mut all_samples, &mut csv);
-    print_window(
-        &window,
-        overall_start
-            .elapsed()
-            .as_secs_f64(),
-    );
+    // One more drain, now that every thread has returned: a worker's last
+    // partial batch, or a merge that was still running when the reporter
+    // took its last look, lands after the reporter's last drain. For a
+    // merge that takes seconds, that can be all the data there is.
+    let window = drain_samples(&run.samples, &mut all_samples, &mut csv);
+    print_window(&window, run.elapsed_secs());
     if let Some(w) = csv.as_mut() {
         w.flush()
             .unwrap();
     }
 
+    print_summary(&mut all_samples);
+    let _ = run
+        .db
+        .close();
+}
+
+/// Open the store the run uses, emptying its directory first unless
+/// `--keep` was given.
+fn open_store(args: &Args) -> Engine {
+    if !args.keep {
+        let _ = std::fs::remove_dir_all(&args.dir);
+    }
+    let options = Options {
+        max_file_size: args.max_file_size,
+        should_sync_on_put: args.sync_on_put,
+        key_order: if args.sorted_keydir {
+            KeyOrder::Sorted
+        } else {
+            KeyOrder::Hashed
+        },
+        ..Options::default()
+    };
+    Engine::open(&args.dir, options).expect("failed to open datastore")
+}
+
+/// Give every key a value, so that reads hit from the first one.
+fn prepopulate(db: &Engine, keys: u64, value: &[u8]) {
+    eprintln!("pre-populating {keys} keys...");
+    for k in 0..keys {
+        db.put(&key_bytes(k), value, now_unix())
+            .unwrap();
+    }
+}
+
+/// The `--csv` file with its header written, if one was asked for.
+fn open_csv(args: &Args) -> Option<BufWriter<File>> {
+    let path = args
+        .csv
+        .as_ref()?;
+    let mut w = BufWriter::new(File::create(path).expect("failed to create --csv file"));
+    writeln!(w, "elapsed_secs,op,latency_ns").unwrap();
+    Some(w)
+}
+
+/// A worker thread: gets, puts and deletes on random keys, in the
+/// proportions the weights give, until the run stops.
+fn work(run: &Run, args: &Args, value: &[u8], worker_id: u64) {
+    const BATCH: usize = 64;
+    let (read_w, write_w) = (args.read_weight as u64, args.write_weight as u64);
+    let total_weight = read_w + write_w + args.delete_weight as u64;
+    let mut rng = Rng::new(0x9E3779B97F4A7C15u64.wrapping_add(worker_id + 1));
+    let mut batch: Vec<Sample> = Vec::with_capacity(BATCH);
+
+    while !run
+        .stop
+        .load(Ordering::Relaxed)
+    {
+        let key = key_bytes(rng.next_u64() % args.keys);
+        let pick = rng.next_u64() % total_weight;
+
+        let op_start = Instant::now();
+        let kind = if pick < read_w {
+            run.db
+                .get(&key)
+                .unwrap();
+            OpKind::Get
+        } else if pick < read_w + write_w {
+            run.db
+                .put(&key, value, now_unix())
+                .unwrap();
+            OpKind::Put
+        } else {
+            run.db
+                .delete(&key, now_unix())
+                .unwrap();
+            OpKind::Delete
+        };
+        let sample = run.sample(kind, op_start);
+
+        if run
+            .recording
+            .load(Ordering::Relaxed)
+        {
+            batch.push(sample);
+            if batch.len() >= BATCH {
+                run.record(&mut batch);
+            }
+        }
+    }
+    run.record(&mut batch);
+}
+
+/// The merge thread: one merge every `interval`, until the run stops.
+fn merge_periodically(run: &Run, interval: Duration) {
+    while !sleep_or_stop(interval, &run.stop) {
+        let merge_start = Instant::now();
+        run.db
+            .merge()
+            .unwrap();
+        let sample = run.sample(OpKind::Merge, merge_start);
+        eprintln!("[merge] took {}", fmt_ns(sample.2));
+        if run
+            .recording
+            .load(Ordering::Relaxed)
+        {
+            run.record(&mut vec![sample]);
+        }
+    }
+}
+
+/// The reporting loop, on the main thread: every report interval, print
+/// the percentiles of the samples recorded since the last report. Returns
+/// when warmup and duration have both elapsed.
+fn report_until_done(
+    run: &Run,
+    args: &Args,
+    all_samples: &mut HashMap<OpKind, Vec<u64>>,
+    csv: &mut Option<BufWriter<File>>,
+) {
+    let warmup = Duration::from_secs(args.warmup_secs);
+    let total_run = warmup + Duration::from_secs(args.duration_secs);
+    let report_interval = Duration::from_secs(
+        args.report_interval_secs
+            .max(1),
+    );
+    println!(
+        "{:>9} {:>7} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "elapsed", "op", "count", "p50", "p90", "p99", "p99.9", "max"
+    );
+
+    while run
+        .start
+        .elapsed()
+        < total_run
+    {
+        let remaining = total_run.saturating_sub(
+            run.start
+                .elapsed(),
+        );
+        std::thread::sleep(report_interval.min(remaining.max(Duration::from_millis(1))));
+
+        let is_warmup_over = run
+            .start
+            .elapsed()
+            >= warmup;
+        if is_warmup_over
+            && !run
+                .recording
+                .swap(true, Ordering::Relaxed)
+        {
+            eprintln!("--- warmup complete, recording ---");
+        }
+
+        let window = drain_samples(&run.samples, all_samples, csv);
+        print_window(&window, run.elapsed_secs());
+    }
+}
+
+/// Print the percentiles of everything recorded, per kind of operation.
+fn print_summary(all_samples: &mut HashMap<OpKind, Vec<u64>>) {
     println!("\n=== final summary (recorded, post-warmup samples only) ===");
     for kind in ALL_KINDS {
         if let Some(v) = all_samples.get_mut(&kind) {
@@ -469,9 +514,5 @@ fn main() {
                 )
             );
         }
-    }
-
-    if let Ok(db) = Arc::try_unwrap(db) {
-        let _ = db.close();
     }
 }

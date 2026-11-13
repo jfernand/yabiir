@@ -1,0 +1,8 @@
+[package]
+name = "yabiir-testutil"
+version = "0.1.0"
+edition.workspace = true
+description = "Helpers shared by the tests and benchmarks of the yabiir crates"
+license.workspace = true
+repository.workspace = true
+publish = false

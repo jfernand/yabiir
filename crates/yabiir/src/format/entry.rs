@@ -19,6 +19,15 @@ impl Entry {
         self.header
             .tombstone
     }
+
+    /// How far into the entry its value starts: past the header and the key.
+    /// The keydir stores the position of the value, not of the entry.
+    pub(crate) fn value_offset(&self) -> u64 {
+        HEADER_SIZE as u64
+            + self
+                .key
+                .len() as u64
+    }
 }
 
 /// A fully-encoded data-file entry (CRC + header + key + value), ready to
@@ -73,12 +82,12 @@ impl AsRef<[u8]> for EncodedEntry {
 /// Encode a full entry (header + key + value), CRC included, ready to be
 /// appended to a data file.
 ///
-/// # Panics
-/// Panics (via `debug_assert!` in `encode_ksz`) in debug builds if
-/// `key.len() > MAX_KEY_LEN`; release builds silently truncate the high bit
-/// away, which the caller must not rely on — validate key length before
-/// calling this in the engine layer.
+/// The caller checks the sizes first: the key must fit in
+/// [`MAX_KEY_LEN`](super::MAX_KEY_LEN) bytes and the value in
+/// [`MAX_VALUE_LEN`](super::MAX_VALUE_LEN). `Engine` does, and rejects
+/// anything larger; this function would write a header that says otherwise.
 pub fn encode_entry(key: &[u8], value: &[u8], tombstone: bool, tstamp: u32) -> EncodedEntry {
+    debug_assert!(value.len() as u64 <= super::MAX_VALUE_LEN as u64);
     let ksz_and_flags = encode_key_size(key.len() as u32, tombstone);
     let value_sz = value.len() as u32;
 
@@ -176,24 +185,35 @@ pub fn read_entry<R: Read>(r: &mut R) -> io::Result<Option<EntryRead>> {
         return Ok(Some(EntryRead::Truncated));
     }
     let (crc, header) = decode_entry_header(&header_buf);
-    let body_len = header.key_size as usize + header.value_size as usize;
-    let mut body = vec![0u8; body_len];
-    let n2 = read_up_to(r, &mut body)?;
-    if n2 < body_len {
+    let key_len = header.key_size as usize;
+    let body_len = key_len as u64 + header.value_size as u64;
+
+    // Read through `take`, which grows the buffer as bytes arrive: a torn or
+    // corrupt header can declare gigabytes that aren't there, and they must
+    // not be allocated up front.
+    let mut body = Vec::new();
+    r.by_ref()
+        .take(body_len)
+        .read_to_end(&mut body)?;
+    if (body.len() as u64) < body_len {
         return Ok(Some(EntryRead::Truncated));
     }
-    let total_len = (HEADER_SIZE + body_len) as u64;
 
-    let mut crc_input = Vec::with_capacity(HEADER_SIZE - 4 + body_len);
-    crc_input.extend_from_slice(&header_buf[4..]);
-    crc_input.extend_from_slice(&body);
-    if !verify_crc(crc, &crc_input) {
+    let total_len = HEADER_SIZE as u64 + body_len;
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&header_buf[4..]);
+    hasher.update(&body);
+    if hasher.finalize() != crc {
         return Ok(Some(EntryRead::CrcMismatch { total_len }));
     }
 
-    let key = body[..header.key_size as usize].to_vec();
-    let value = body[header.key_size as usize..].to_vec();
-    Ok(Some(EntryRead::Ok(Entry { header, key, value }, total_len)))
+    let value = body.split_off(key_len);
+    let entry = Entry {
+        header,
+        key: body,
+        value,
+    };
+    Ok(Some(EntryRead::Ok(entry, total_len)))
 }
 
 #[cfg(test)]

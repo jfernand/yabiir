@@ -1,56 +1,18 @@
-//! Benchmarks for data file management (`src/datafile.rs`). See
+//! Benchmarks for data file management (`src/datafile/`). See
 //! `docs/bitcask-implementation-plan.md` §3.
 //!
 //! These exercise real filesystem I/O (not an in-memory fake), since the
 //! whole point of `ActiveFile`/`DataFileSet` is I/O behavior — buffering,
 //! fsync cost, and positioned reads. Run with: `cargo bench --bench datafile`
 
-use std::fs;
 use std::hint::black_box;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use yabiir::datafile::{ActiveFile, DataFileSet};
 use yabiir::format;
+use yabiir_testutil::TempDir;
 
 const VALUE_SIZES: &[usize] = &[64, 1024, 16 * 1024, 32 * 1024, 64 * 1024];
-
-/// Minimal self-cleaning temp directory — mirrors the one in
-/// `src/datafile.rs`'s own tests, duplicated here since that one is
-/// private to this crate's test module and benches are a separate crate.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "yabiir-datafile-bench-{}-{}-{}",
-            std::process::id(),
-            n,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl std::ops::Deref for TempDir {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 
 /// `ActiveFile::append` without a sync per write — the common case
 /// (`sync_on_put: false`), buffered through `BufWriter` so cost is
@@ -125,7 +87,7 @@ fn bench_active_file_read_at(c: &mut Criterion) {
         let mut active = ActiveFile::create(&dir, 1).unwrap();
         let value = vec![0xEFu8; size];
         let encoded = format::encode_entry(b"key", &value, false, 0);
-        let (_, value_pos, _) = active
+        let value_pos = active
             .append(&encoded)
             .unwrap();
         active
@@ -158,9 +120,10 @@ fn bench_data_file_set_read_at_cached(c: &mut Criterion) {
         let mut active = ActiveFile::create(&dir, 1).unwrap();
         let value = vec![0x11u8; size];
         let encoded = format::encode_entry(b"key", &value, false, 0);
-        let (file_id, value_pos, _) = active
+        let value_pos = active
             .append(&encoded)
             .unwrap();
+        let file_id = active.file_id();
         active
             .sync()
             .unwrap();

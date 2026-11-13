@@ -2,6 +2,7 @@ use std::fmt;
 
 /// Errors surfaced by the [`crate::api::Bitcask`] API.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Underlying I/O failure (open/read/write/sync/rename/remove, etc.).
     Io(std::io::Error),
@@ -10,16 +11,13 @@ pub enum Error {
     AlreadyLocked,
     /// `put`/`delete` was called with a zero-length key.
     EmptyKey,
-    /// A data or hint file failed CRC verification or had an unrecognized
-    /// layout that could not be explained by a clean truncation.
-    Corrupt(String),
-    /// A mutating call (`put`/`delete`/`merge`/`sync`) was made on a handle
-    /// opened with `read_write: false`.
+    /// The key is longer than an entry can record: more than 2³¹ − 1 bytes.
+    KeyTooLarge,
+    /// The value is longer than an entry can record: more than 2³² − 1
+    /// bytes.
+    ValueTooLarge,
+    /// `put`, `delete` or `merge` was called on a handle opened read-only.
     ReadOnly,
-    /// The call names a real, planned part of the design
-    /// (`docs/bitcask-implementation-plan.md`) that this milestone's
-    /// implementation doesn't provide yet — e.g. `merge` before §7 lands.
-    NotImplemented(&'static str),
     /// A range of keys (`Engine::scan`) was asked of a store whose keydir
     /// keeps no order — opened with `key_order: KeyOrder::Hashed`.
     Unordered,
@@ -33,9 +31,9 @@ impl fmt::Display for Error {
                 write!(f, "directory already locked for writing by another handle")
             }
             Error::EmptyKey => write!(f, "key must not be empty"),
-            Error::Corrupt(msg) => write!(f, "data file corrupt: {msg}"),
+            Error::KeyTooLarge => write!(f, "key too large: the limit is 2^31 - 1 bytes"),
+            Error::ValueTooLarge => write!(f, "value too large: the limit is 2^32 - 1 bytes"),
             Error::ReadOnly => write!(f, "datastore is not open for writing (read-only handle)"),
-            Error::NotImplemented(what) => write!(f, "not implemented yet: {what}"),
             Error::Unordered => write!(
                 f,
                 "a range of keys needs a sorted keydir: open with key_order: KeyOrder::Sorted"
@@ -71,9 +69,9 @@ mod tests {
             (Error::Io(std::io::Error::other("boom")), "boom"),
             (Error::AlreadyLocked, "locked"),
             (Error::EmptyKey, "empty"),
-            (Error::Corrupt("bad crc".to_string()), "bad crc"),
             (Error::ReadOnly, "read-only"),
-            (Error::NotImplemented("merge"), "merge"),
+            (Error::KeyTooLarge, "key too large"),
+            (Error::ValueTooLarge, "value too large"),
             (Error::Unordered, "sorted keydir"),
         ];
         for (err, needle) in cases {

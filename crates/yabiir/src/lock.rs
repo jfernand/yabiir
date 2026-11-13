@@ -34,8 +34,10 @@ impl DirLock {
             .truncate(true) // content is never read; only the fd/flock matters
             .write(true)
             .open(&path)?;
-        file.try_lock_exclusive()
-            .map_err(|_| Error::AlreadyLocked)?;
-        Ok(Self(file))
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Self(file)),
+            Err(e) if e.kind() == fs2::lock_contended_error().kind() => Err(Error::AlreadyLocked),
+            Err(e) => Err(Error::Io(e)),
+        }
     }
 }

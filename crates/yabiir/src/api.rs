@@ -5,8 +5,6 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::metrics::Metrics;
 
-/// Tuning/mode knobs for opening a [`Bitcask`] datastore.
-///
 /// How the keydir — the in-memory index from each key to its newest value —
 /// keeps its keys. Chosen per open: nothing about it is stored on disk, so the
 /// same store can be opened either way.
@@ -24,18 +22,21 @@ pub enum KeyOrder {
     Sorted,
 }
 
-/// See `docs/bitcask-implementation-plan.md` §9 for the rationale behind
-/// each field.
+/// How to open a store. See `docs/bitcask-implementation-plan.md` §9 for the
+/// reasoning behind each field.
 #[derive(Clone)]
 pub struct Options {
-    /// Open for reading and writing (`true`) or read-only (`false`).
-    /// Only one `read_write` handle may be open on a given directory at a
-    /// time, enforced via a process-level directory lock.
+    /// Open for reading and writing (`true`) or read-only (`false`). Only
+    /// one read-write handle can be open on a directory at a time; a lock
+    /// file in the directory enforces it.
     pub is_read_write: bool,
-    /// Fsync the active file after every `put`/`delete`. Safer, slower.
+    /// Whether `put` and `delete` wait until the entry is fsynced before
+    /// they return. Safer and slower. Concurrent writers share fsyncs
+    /// (group commit). Without it, a write survives a crash of the process
+    /// but not necessarily one of the machine.
     pub should_sync_on_put: bool,
-    /// Size (bytes) at which the active file is rotated and a new one
-    /// started.
+    /// The size, in bytes, at which the active file is closed and a new one
+    /// started. A file can exceed it by one entry.
     pub max_file_size: u64,
     /// Observe `put`/`get`/`delete`/`merge`/`sync` call durations — `None`
     /// (the default) records nothing. See [`Metrics`].
@@ -46,6 +47,7 @@ pub struct Options {
 }
 
 impl Options {
+    /// These options, for a read-only handle.
     pub fn read_only(self) -> Self {
         Self {
             is_read_write: false,
@@ -102,58 +104,65 @@ impl fmt::Debug for Options {
 /// over a bare directory path, since this design has no Erlang-VM-style
 /// cross-process keydir sharing to lean on.
 pub trait Bitcask: Sized {
-    /// Open a new or existing Bitcask datastore at `dir`, creating the
-    /// directory if it does not exist.
+    /// Open the store in `dir`, rebuilding the keydir from its files (from
+    /// hint files where there are valid ones) before returning.
     ///
-    /// If `opts.read_write` is `true`, this acquires an exclusive
-    /// process-level lock on the directory and fails with
-    /// [`crate::error::Error::AlreadyLocked`] if another `read_write` handle
-    /// already holds it. Recovery (rebuilding the keydir from the on-disk
-    /// files, preferring hint files where available) happens synchronously
-    /// as part of this call.
+    /// A read-write open creates the directory if it is missing and takes
+    /// an exclusive lock on it; it fails with [`Error::AlreadyLocked`] if
+    /// another read-write handle, in this process or another, holds the
+    /// lock. A read-only open ([`Options::read_only`]) takes no lock and
+    /// creates nothing. It sees the store as it was when it was opened, not
+    /// later writes, and shouldn't be used while a writer merges, which
+    /// removes files under it.
+    ///
+    /// [`Error::AlreadyLocked`]: crate::Error::AlreadyLocked
     fn open(dir: impl AsRef<Path>, opts: Options) -> Result<Self>;
 
-    /// Retrieve the current value for `key`, or `Ok(None)` if the key does
-    /// not exist (or has been deleted).
+    /// The current value of `key`, or `Ok(None)` if it has none.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
-    /// Store `value` under `key`, appending a new entry to the active file
-    /// and updating the keydir. Overwrites any existing value for `key`.
+    /// Store `value` under `key`, replacing any value it had.
     ///
-    /// Returns [`crate::error::Error::EmptyKey`] if `key` is empty, and
-    /// [`crate::error::Error::ReadOnly`] if this handle was opened with
-    /// `read_write: false`.
+    /// Fails with [`Error::EmptyKey`] for an empty key,
+    /// [`Error::KeyTooLarge`] or [`Error::ValueTooLarge`] for a key or
+    /// value the file format can't record, and [`Error::ReadOnly`] on a
+    /// read-only handle. On an I/O error the write may or may not have
+    /// taken effect.
+    ///
+    /// [`Error::EmptyKey`]: crate::Error::EmptyKey
+    /// [`Error::KeyTooLarge`]: crate::Error::KeyTooLarge
+    /// [`Error::ValueTooLarge`]: crate::Error::ValueTooLarge
+    /// [`Error::ReadOnly`]: crate::Error::ReadOnly
     fn put(&self, key: &[u8], value: &[u8], timestamp: u32) -> Result<()>;
 
-    /// Remove `key`, appending a tombstone entry and evicting `key` from the
-    /// keydir. A no-op (not an error) if `key` does not currently exist.
-    /// Space used by the deleted value and its tombstone is reclaimed by a
-    /// subsequent [`Bitcask::merge`].
+    /// Remove `key`. Deleting a key that has no value is not an error. The
+    /// space the value took is reclaimed by the next [`Bitcask::merge`].
     fn delete(&self, key: &[u8], timestamp: u32) -> Result<()>;
 
-    /// Return a snapshot of every currently-live key.
+    /// Every live key, as of one instant.
     fn list_keys(&self) -> Result<Vec<Vec<u8>>>;
 
-    /// Fold `f` over every currently-live `(key, value)` pair, starting
-    /// from `init`. `f` is applied over a point-in-time snapshot of the
-    /// keydir taken at the start of the call; concurrent writes made during
-    /// the fold are not guaranteed to be observed.
+    /// Fold `f` over every live `(key, value)` pair, starting from `init`.
+    /// The keys and the values' locations are those of one instant, at the
+    /// start of the call; writes made during the fold aren't seen.
     fn fold<A>(&self, f: impl FnMut(&[u8], &[u8], A) -> A, init: A) -> Result<A>;
 
-    /// Compact this datastore: copy forward only the live entries from all
-    /// non-active data files into a fresh, smaller set of data files (each
-    /// with an accompanying hint file for fast future recovery), then
-    /// remove the old files. Dead entries — superseded values and
-    /// tombstones — are dropped. Safe to call concurrently with ongoing
-    /// `put`/`get`/`delete` calls; a key written concurrently with the
-    /// merge is never lost.
+    /// Compact the store: copy the live entries of every data file into
+    /// new files, each with a hint file that speeds up the next open, and
+    /// remove the old files. Replaced values, deleted keys and their
+    /// tombstones are dropped.
+    ///
+    /// Safe to call while other threads read and write. A write made
+    /// during a merge wins over the merge's copy of the same key, in this
+    /// session and after a reopen. Concurrent calls run one after another.
     fn merge(&self) -> Result<()>;
 
-    /// Force any buffered writes to be durably flushed to disk.
+    /// Make every write so far durable: flush and fsync the active file. A
+    /// no-op on a read-only handle.
     fn sync(&self) -> Result<()>;
 
-    /// Close this handle, flushing pending writes and releasing the
-    /// directory lock (if held). Equivalent to dropping the handle, but
-    /// lets close-time I/O errors be observed instead of ignored.
+    /// Close this handle: make every write durable, as [`Bitcask::sync`]
+    /// does, and release the directory's lock. Dropping a handle releases
+    /// the lock too, but doesn't fsync and can't report an error.
     fn close(self) -> Result<()>;
 }

@@ -1,9 +1,19 @@
-# Virtual workspace: no package at the root. Each storage engine is its own
-# crate under `crates/`; `xtask` is a small unpublished dev-tooling crate
-# (`cargo xtask release`, see README.md).
+# Virtual workspace: no package at the root.
+#
+# - `crates/yabiir`: the storage engine, the one published crate.
+# - `crates/yabiir-sql`: a small SQL front end over a store.
+# - `crates/yabiir-cli`: `kv`, a command-line front end.
+# - `crates/yabiir-loadtest`: `loadtest`, a load generator.
+# - `crates/yabiir-examples`: example programs with heavy dependencies.
+# - `xtask`: dev tooling (`cargo xtask release`, `cargo xtask bench`).
 [workspace]
-members = ["crates/yabiir", "xtask"]
+members = ["crates/*", "xtask"]
 resolver = "3"
+
+[workspace.dependencies]
+yabiir = { path = "crates/yabiir", version = "0.6.0" }
+yabiir-testutil = { path = "crates/yabiir-testutil" }
+clap = { version = "4.6.6", features = ["derive"] }
 
 # Fields shared by every published crate; members opt in with
 # `field.workspace = true`.

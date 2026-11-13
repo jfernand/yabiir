@@ -11,49 +11,11 @@
 //! caller would use it.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::ops::Bound;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use proptest::prelude::*;
 use yabiir::{Bitcask, Engine, KeyOrder, Options, now_unix};
-
-/// Minimal self-cleaning temp directory — same pattern used throughout this
-/// crate's own tests and benches.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "yabiir-model-test-{}-{}-{}",
-            std::process::id(),
-            n,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl std::ops::Deref for TempDir {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use yabiir_testutil::TempDir;
 
 #[derive(Debug, Clone)]
 enum Op {

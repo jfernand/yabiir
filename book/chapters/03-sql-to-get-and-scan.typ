@@ -2,8 +2,8 @@
 
 = From SQL to get/scan <ch-sql>
 
-#status[Incipient. Parsing is waved at; the tree, the planner and the executor are real, in yabiir's
-`sql` feature, and the outputs are real runs of `sql`, the chapter's program.]
+#status[Incipient. Parsing is waved at; the tree, the planner and the executor are real, in the
+`yabiir-sql` crate, and the outputs are real runs of `sql`, the chapter's program.]
 
 #epigraph(source: [Chamberlin and Boyce, 1974, query Q1 @chamberlin1974])[`SELECT NAME FROM EMP
 WHERE DEPT = 'TOY'`]
@@ -18,9 +18,9 @@ translations by hand. A database makes them itself, from the text, in three step
 
 The _parser_ reads the text and builds a tree of what the query says: the _abstract syntax tree_,
 or AST. The _planner_ turns the tree into a _plan_: which of the store's operations to call, and
-what to do with the rows they return. The _executor_ runs the plan. yabiir has all three now, behind
-its `sql` feature, for the queries this book has reached, plus one: `BETWEEN`, the range that
-@ch-sorted's sorted keydir is for.
+what to do with the rows they return. The _executor_ runs the plan. yabiir has all three now, in a
+crate of their own, `yabiir-sql`, built on the store's public API, for the queries this book has
+reached, plus one: `BETWEEN`, the range that @ch-sorted's sorted keydir is for.
 
 #syntax(rr-seq(rr-kw("SELECT"), rr-opt(rr-kw("DISTINCT")),
   rr-choice(rr-kw("*"), rr-kw("key"), rr-kw("value")),
@@ -38,7 +38,7 @@ Parsing is a subject of its own, and this chapter waves at it. The parser cuts t
 _tokens_ — words, strings in quotes, `*` and `=` — and reads them with one function for each rule of
 the grammar in the diagram: `select` calls `fields`, then `condition` if it finds a `WHERE`, and each
 function either consumes the tokens it expects or stops with an error that says what it expected and
-where.#footnote[About 340 lines, a hundred of them tests, in #repo("crates/yabiir/src/sql/parse.rs").
+where.#footnote[About 340 lines, a hundred of them tests, in #repo("crates/yabiir-sql/src/parse.rs").
 This is a _recursive-descent_ parser, the kind people write by hand; a grammar this small needs no
 generator.] A condition on the value is a field the grammar doesn't allow there yet:#footnote[Every
 run in this chapter is from #repo("book/code/ch03/run.sh"), on Chapter 0's five computers; its
@@ -54,7 +54,7 @@ syntax error at byte 15: expected key (conditions on the key only, so far), foun
 
 The tree keeps what the query says and forgets how it was spelled: `select distinct VALUE` and
 `SELECT DISTINCT value` are different text and the same tree. Here is all of it:#footnote[From
-#repo("crates/yabiir/src/sql/ast.rs"), doc comments shortened.]
+#repo("crates/yabiir-sql/src/ast.rs"), doc comments shortened.]
 
 ```rust
 pub struct Select {
@@ -101,7 +101,7 @@ a decision the planner makes on its own, and the next section shows when it choo
 == The plan
 
 A plan is a tree too, of _operators_. The leaves read the store, one way each; the nodes above them
-reshape the rows the leaves produce:#footnote[From #repo("crates/yabiir/src/sql/plan.rs").]
+reshape the rows the leaves produce:#footnote[From #repo("crates/yabiir-sql/src/plan.rs").]
 
 ```rust
 pub enum Plan {

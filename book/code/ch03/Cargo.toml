@@ -8,4 +8,5 @@ publish = false
 [workspace]
 
 [dependencies]
-yabiir = { path = "../../../crates/yabiir", features = ["sql"] }
+yabiir = { path = "../../../crates/yabiir" }
+yabiir-sql = { path = "../../../crates/yabiir-sql" }

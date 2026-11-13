@@ -148,7 +148,7 @@ written" @sheehy2010bitcask — and the design meets that goal by giving order u
   A good hash function sends similar keys to unrelated buckets. FxHash, tried for yabiir's keydir
   before aHash, does too little of that: 10,000 sequential keys of the form `key-0000000042` landed in
   one of 16,384 buckets, and every keydir operation became a walk of that one bucket.#footnote[The
-  measurement is recorded in the doc comment on `Keydir`, in #repo("crates/yabiir/src/keydir.rs").]
+  measurement is recorded in the doc comment on `Keydir`, in #repo("crates/yabiir/src/keydir/mod.rs").]
   A hash that does spread keys well leaves no trace of their order, and only sorting gets it back.
 ]
 

@@ -54,7 +54,7 @@ Open decisions are marked **Decision:**.
 - **What:** what happens between the text of a query and the calls on the store: parse → AST →
   plan → execute. Parsing waved at; the tree, a rule-based planner and a push executor walked
   through, with `EXPLAIN`-style plans from real runs.
-- **yabiir needs:** the `sql` feature (`yabiir::sql`): `parse`, `Select`, `plan`, `Plan`, `execute`.
+- **yabiir needs:** the `yabiir-sql` crate: `parse`, `Select`, `plan`, `Plan`, `execute`.
   Grows with each step: every new piece of grammar adds AST variants, plan operators and rules.
 
 ### 4. Values with attributes — the record gets structure
@@ -198,7 +198,7 @@ an extension, with grouping defined over sets so it doesn't smuggle bags back in
 | 1 | `SELECT *` (π) | `open`, `fold` |
 | 2 | `WHERE key = k` (σ) | `get` |
 | 3 | `WHERE key BETWEEN …` (σ) | ordered keydir, `scan` |
-| 3a | text → tree → plan | `sql` feature: parser, AST, planner, executor; `Engine::key_order` |
+| 3a | text → tree → plan | `yabiir-sql` crate: parser, AST, planner, executor; `Engine::key_order` |
 | 4 | attributes in values | value codec (layer above the engine) |
 | 5 | `UNION` / `INTERSECT` / `EXCEPT` | tables (key prefix); merge of two scans |
 | 6–8 | ×, ⋈, ÷ | nothing new |

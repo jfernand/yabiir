@@ -5,7 +5,7 @@
 //!
 //! `--sorted` opens the store with a sorted keydir, which lets the planner use a range scan.
 
-use yabiir::sql::{self, Condition, Select};
+use yabiir_sql::{self as sql, Condition, Select};
 use yabiir::{Bitcask, Engine, KeyOrder, Options};
 
 fn main() {

@@ -1,17 +1,16 @@
 #import "../template/isss.typ": *
 
-= Secondary Indexes <ch-secondary>
+= Secondary Indices <ch-secondary>
 
 #status[Incipient. The idea and its costs are stated; nothing is designed in detail, and the
 consistency story is open.]
 
-A mailbox stored by `(account, mailbox, uid)` lists its messages in UID order, and email-mcp's
-`search_messages` asks for them by sender and by date. In its first version the cache answers those
-by scanning the whole mailbox — about 16,000 small records for the 16,720-message INBOX, expected to
-take tens of milliseconds, a number still to be measured @isss-tr-0503. An index on the sender or the
+A mailbox stored by `(account, mailbox, uid)` lists its messages in UID order, and an email
+program's search asks for them by sender and by date. Without another index it answers those by
+scanning the whole mailbox: every record of a 16,720-message INBOX, to return a handful. An index on the sender or the
 date replaces that scan with a range scan.
 
-== Secondary indexes
+== Secondary indices
 
 A _secondary index_ maps the value of a field to the primary keys of the records that have it. A
 lookup through it takes two steps: a scan of the index for primary keys, then a `get` of each record.
@@ -42,7 +41,7 @@ Every index makes reads cheaper and writes more expensive:
 #table(
   columns: (auto, 1fr),
   [Cost], [Cause],
-  [Write amplification], [A `put` writes the record and one entry per index: five indexes, six
+  [Write amplification], [A `put` writes the record and one entry per index: five indices, six
     writes.],
   [Read before write], [Changing an indexed field means deleting the old index entry, so the old
     record has to be read first to know what it was.],
@@ -56,7 +55,7 @@ Every index makes reads cheaper and writes more expensive:
   pay for their complexity.
 ]
 
-== Inverted indexes
+== Inverted indices
 
 An _inverted index_ is the secondary index of a search engine, with many entries per record. Each
 document is split into words, and the index maps every word to the documents that contain it, its
@@ -80,7 +79,7 @@ A single sort order can't do the work of these:
 
 - _Aggregate trees_ store a count or a sum in each tree node, so the number of keys in a range is
   read from O(log n) nodes instead of counted.
-- _Multi-dimensional indexes_, such as Antonin Guttman's R-tree @guttman1984rtree, answer "points
+- _Multi-dimensional indices_, such as Antonin Guttman's R-tree @guttman1984rtree, answer "points
   inside this rectangle," which no ordering of points by one coordinate answers well.
 - _Bloom filters_ @bloom1970 spend a few bits per key to answer "definitely not here," and storage
   engines use them to skip files that can't contain a key.

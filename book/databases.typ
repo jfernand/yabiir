@@ -3,10 +3,10 @@
 #show: book.with(
   title: "Append Only",
   display-title: [Append\ Only],
-  subtitle: [Easing into databases one step at a time — from a single log file and a hash map to sorted keys, tables and indexes, built in Rust on yabiir.],
+  subtitle: [Easing into databases one step at a time — from a single log file and a hash map to sorted keys, tables and indices, built in Rust on yabiir.],
   author: "Javier",
   edition: "Incipient draft · 2026",
-  band: "Logs · Indexes · Tables · Rust",
+  band: "Logs · Indices · Tables · Rust",
 )
 
 #set page(numbering: "i")
@@ -22,7 +22,8 @@
 #include "chapters/00-select-star.typ"
 #include "chapters/01-selection-by-key.typ"
 #include "chapters/02-sorted-indexes.typ"
-#include "chapters/03-secondary-indexes.typ"
+#include "chapters/03-sql-to-get-and-scan.typ"
+#include "chapters/04-secondary-indexes.typ"
 
 #appendices[
 #include "chapters/A-bags-and-nulls.typ"

@@ -1,0 +1,86 @@
+$ sql DIR "SELECT *"
+tree: Select { distinct: false, fields: All, condition: None }
+plan:
+  FullScan (fold: every row)
+ key         | value
+-------------+-------
+ zx-spectrum | 1982
+ apple-ii    | 1977
+ bbc-micro   | 1981
+ ibm-pc      | 1981
+ c64         | 1982
+(5 rows)
+
+$ sql DIR "SELECT DISTINCT value"
+tree: Select { distinct: true, fields: Value, condition: None }
+plan:
+  Distinct
+    Project value
+      FullScan (fold: every row)
+ value
+-------
+ 1982
+ 1981
+ 1977
+(3 rows)
+
+$ sql DIR "SELECT DISTINCT key"
+tree: Select { distinct: true, fields: Key, condition: None }
+plan:
+  Project key
+    FullScan (fold: every row)
+ key
+-------------
+ ibm-pc
+ zx-spectrum
+ c64
+ bbc-micro
+ apple-ii
+(5 rows)
+
+$ sql DIR "SELECT value WHERE key = 'zx-spectrum'"
+tree: Select { distinct: false, fields: Value, condition: Some(KeyEquals("zx-spectrum")) }
+plan:
+  Project value
+    Get 'zx-spectrum' (get: one lookup)
+ value
+-------
+ 1982
+(1 row)
+
+$ sql DIR "SELECT DISTINCT value WHERE key = 'zx-spectrum'"
+tree: Select { distinct: true, fields: Value, condition: Some(KeyEquals("zx-spectrum")) }
+plan:
+  Project value
+    Get 'zx-spectrum' (get: one lookup)
+ value
+-------
+ 1982
+(1 row)
+
+$ sql DIR "SELECT * WHERE key BETWEEN 'a' AND 'c'"
+tree: Select { distinct: false, fields: All, condition: Some(KeyBetween("a", "c")) }
+plan:
+  Filter key BETWEEN 'a' AND 'c'
+    FullScan (fold: every row)
+ key       | value
+-----------+-------
+ bbc-micro | 1981
+ apple-ii  | 1977
+(2 rows)
+
+$ sql DIR "SELECT * WHERE key BETWEEN 'a' AND 'c'" --sorted
+tree: Select { distinct: false, fields: All, condition: Some(KeyBetween("a", "c")) }
+plan:
+  RangeScan 'a' .. 'c' (scan: sorted keydir)
+ key       | value
+-----------+-------
+ apple-ii  | 1977
+ bbc-micro | 1981
+(2 rows)
+
+$ sql DIR "SELECT * WHERE value = '1982'"
+syntax error at byte 15: expected key (conditions on the key only, so far), found VALUE
+  SELECT * WHERE value = '1982'
+                 ^
+

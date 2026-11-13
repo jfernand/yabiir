@@ -37,14 +37,25 @@ Open decisions are marked **Decision:**.
   'zx-spectrum'`. (σ<sub>true</sub> is already in Chapter 0.)
 - **yabiir needs:** `get`. σ<sub>key = k</sub> is one keydir lookup instead of a fold over everything.
 - **Status:** Chapter 1, *Selection by Key*, done (2026-11-11). It absorbed the old keydir chapter:
-  the entry format, the keydir and hash indexes, plus both translations measured on a million rows.
+  the entry format, the keydir and hash indices, plus both translations measured on a million rows.
 
 ### 3. σ — Restriction, on ranges of the key
 
 - **What:** `WHERE key BETWEEN 'a' AND 'c'`, `WHERE key LIKE 'zx-%'` (prefix), and the comparison
   operators < ≤ > ≥ on the key.
 - **yabiir needs:** an ordered keydir and `scan(range)` — the `BTreeMap` change, `yabiir-btree`.
-- **Old material:** the current Chapter 2 (sorted indexes, range scans) belongs here.
+- **Old material:** the current Chapter 2 (sorted indices, range scans) belongs here.
+- **Status:** yabiir 0.6.0 has the ordered keydir (`KeyOrder::Sorted`) and `Engine::scan`;
+  Chapter 2 (sorted indices) explains it, and Chapter 3 ("From SQL to get/scan") parses
+  `BETWEEN` and plans it as a range scan.
+
+### 3a. From SQL to get/scan *(Chapter 3, incipient)*
+
+- **What:** what happens between the text of a query and the calls on the store: parse → AST →
+  plan → execute. Parsing waved at; the tree, a rule-based planner and a push executor walked
+  through, with `EXPLAIN`-style plans from real runs.
+- **yabiir needs:** the `sql` feature (`yabiir::sql`): `parse`, `Select`, `plan`, `Plan`, `execute`.
+  Grows with each step: every new piece of grammar adds AST variants, plan operators and rules.
 
 ### 4. Values with attributes — the record gets structure
 
@@ -102,7 +113,7 @@ Not an operator, but π and σ need it to mean anything beyond one value.
   the reader has built every operator, this chapter shows the translation from one to the other —
   which is what a query planner does.
 
-### 10. Secondary indexes
+### 10. Secondary indices
 
 Not an operator: the fix for step 4's slow σ on non-key attributes.
 
@@ -187,6 +198,7 @@ an extension, with grouping defined over sets so it doesn't smuggle bags back in
 | 1 | `SELECT *` (π) | `open`, `fold` |
 | 2 | `WHERE key = k` (σ) | `get` |
 | 3 | `WHERE key BETWEEN …` (σ) | ordered keydir, `scan` |
+| 3a | text → tree → plan | `sql` feature: parser, AST, planner, executor; `Engine::key_order` |
 | 4 | attributes in values | value codec (layer above the engine) |
 | 5 | `UNION` / `INTERSECT` / `EXCEPT` | tables (key prefix); merge of two scans |
 | 6–8 | ×, ⋈, ÷ | nothing new |

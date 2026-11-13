@@ -166,6 +166,156 @@
     text(font: font-mono, size: size, fill: c.steel-800, body))
 ]
 
+// Epigraph: a short quotation under a chapter's opening, with its source.
+#let epigraph(body, source: none) = align(right, block(width: 62%, above: 0.4em, below: 1.8em,
+  breakable: false, align(left)[
+    #set par(justify: false)
+    #text(size: ts.md, fill: c.steel-700, emph(body))
+    #if source != none { v(-0.3em); align(right, text(size: ts.sm, fill: c.amber-txt, [— ] + source)) }
+  ]))
+
+// ─── Syntax (railroad) diagrams ─────────────────────────────────────────────
+// `#syntax(title: …, rr-seq(rr-kw("SELECT"), rr-opt(rr-kw("DISTINCT", new: true)), …))`.
+// Keywords and punctuation are rounded boxes (`rr-kw`), placeholders are square
+// boxes (`rr-ph`). `new: true` paints an item amber: the grammar the section adds.
+// Read left to right along the line; a branch is a choice, a bypass makes an item
+// optional, a loop under an item repeats it, passing through its separator.
+#let rr-kw(s, new: false) = (kind: "box", label: s, round: true, new: new)
+#let rr-ph(s, new: false) = (kind: "box", label: s, round: false, new: new)
+#let rr-skip = (kind: "skip")
+#let rr-seq(..items) = (kind: "seq", items: items.pos())
+#let rr-choice(..items) = (kind: "choice", items: items.pos())
+#let rr-opt(item) = rr-choice(rr-skip, item)
+#let rr-loop(item, sep) = (kind: "loop", item: item, sep: sep)
+
+#let _rr-r = 6pt          // radius of every bend
+#let _rr-gap = 8pt        // line between items in a sequence
+#let _rr-vgap = 7pt       // space between stacked branches
+#let _rr-h = 15pt         // height of a box
+#let _rr-stroke = 0.9pt + c.steel-700
+#let _rr-line(a, b) = place(top + left, line(start: a, end: b, stroke: _rr-stroke))
+// a quarter bend from a to b, turning at the corner `k`
+#let _rr-bend(a, k, b) = place(top + left,
+  curve(stroke: _rr-stroke, curve.move(a), curve.quad(k, b)))
+
+// Lay a node out. The line enters at (0, 0) and leaves at (w, 0); the node
+// reaches `up` above the line and `down` below it. `draw(x, y)` returns the
+// placed pieces with the line's entry at (x, y).
+#let _rr-layout(n) = {
+  let r = _rr-r
+  if n.kind == "skip" {
+    (w: 0pt, up: 0pt, down: 0pt, draw: (x, y) => ())
+  } else if n.kind == "box" {
+    let label = if n.round { text(font: font-mono, size: 8pt, weight: 700, fill: c.ink, n.label) }
+                else { text(font: "Hanken Grotesk", size: 8.4pt, style: "italic", fill: c.ink, n.label) }
+    let w = measure(label).width + if n.round { 14pt } else { 12pt }
+    let h = _rr-h
+    let (fill, stroke) = if n.new { (c.amber-200, 1pt + c.amber-600) }
+                         else if n.round { (c.white, _rr-stroke) } else { (c.paper-dk, _rr-stroke) }
+    (w: w, up: h / 2, down: h / 2, draw: (x, y) => (
+      place(top + left, dx: x, dy: y - h / 2,
+        box(width: w, height: h, radius: if n.round { h / 2 } else { 1.5pt },
+          fill: fill, stroke: stroke, align(center + horizon, label))),
+    ))
+  } else if n.kind == "seq" {
+    let parts = n.items.map(_rr-layout)
+    let w = parts.map(p => p.w).sum(default: 0pt) + _rr-gap * calc.max(parts.len() - 1, 0)
+    (w: w, up: calc.max(0pt, ..parts.map(p => p.up)), down: calc.max(0pt, ..parts.map(p => p.down)),
+     draw: (x, y) => {
+       let out = ()
+       let cx = x
+       for (i, p) in parts.enumerate() {
+         if i > 0 { out.push(_rr-line((cx, y), (cx + _rr-gap, y))); cx += _rr-gap }
+         out += (p.draw)(cx, y)
+         cx += p.w
+       }
+       out
+     })
+  } else if n.kind == "choice" {
+    // the first branch is the main line; the others hang below it
+    let parts = n.items.map(_rr-layout)
+    let inner = calc.max(..parts.map(p => p.w))
+    let w = inner + 4 * r
+    let ys = (0pt,)
+    for i in range(1, parts.len()) {
+      ys.push(ys.at(i - 1) + parts.at(i - 1).down + _rr-vgap + calc.max(parts.at(i).up, r))
+    }
+    let down = calc.max(parts.at(0).down, ys.last() + parts.last().down)
+    (w: w, up: parts.at(0).up, down: down, draw: (x, y) => {
+      let out = ()
+      for (i, p) in parts.enumerate() {
+        let by = y + ys.at(i)
+        let px = x + 2 * r + (inner - p.w) / 2
+        if i == 0 {
+          out.push(_rr-line((x, y), (px, y)))
+          out.push(_rr-line((px + p.w, y), (x + w, y)))
+        } else {
+          out.push(_rr-bend((x, y), (x + r, y), (x + r, y + r)))
+          out.push(_rr-line((x + r, y + r), (x + r, by - r)))
+          out.push(_rr-bend((x + r, by - r), (x + r, by), (x + 2 * r, by)))
+          out.push(_rr-line((x + 2 * r, by), (px, by)))
+          out.push(_rr-line((px + p.w, by), (x + w - 2 * r, by)))
+          out.push(_rr-bend((x + w - 2 * r, by), (x + w - r, by), (x + w - r, by - r)))
+          out.push(_rr-line((x + w - r, by - r), (x + w - r, y + r)))
+          out.push(_rr-bend((x + w - r, y + r), (x + w - r, y), (x + w, y)))
+        }
+        out += (p.draw)(px, by)
+      }
+      out
+    })
+  } else if n.kind == "loop" {
+    // the item on the main line, the way back underneath through the separator
+    let item = _rr-layout(n.item)
+    let sep = _rr-layout(n.sep)
+    let inner = calc.max(item.w, sep.w)
+    let w = inner + 4 * r
+    let by = item.down + _rr-vgap + calc.max(sep.up, r)
+    (w: w, up: item.up, down: by + sep.down, draw: (x, y) => {
+      let ix = x + 2 * r + (inner - item.w) / 2
+      let sx = x + 2 * r + (inner - sep.w) / 2
+      let b = y + by
+      (
+        _rr-line((x, y), (ix, y)),
+        _rr-line((ix + item.w, y), (x + w, y)),
+        _rr-bend((x + w - 2 * r, y), (x + w - r, y), (x + w - r, y + r)),
+        _rr-line((x + w - r, y + r), (x + w - r, b - r)),
+        _rr-bend((x + w - r, b - r), (x + w - r, b), (x + w - 2 * r, b)),
+        _rr-line((x + w - 2 * r, b), (sx + sep.w, b)),
+        _rr-line((sx, b), (x + 2 * r, b)),
+        _rr-bend((x + 2 * r, b), (x + r, b), (x + r, b - r)),
+        _rr-line((x + r, b - r), (x + r, y + r)),
+        _rr-bend((x + r, y + r), (x + r, y), (x + 2 * r, y)),
+      ) + (item.draw)(ix, y) + (sep.draw)(sx, b)
+    })
+  }
+}
+
+#let syntax(diagram, title: "Syntax so far") = block(width: 100%, above: 1.1em, below: 1.1em,
+  breakable: false, stroke: 0.75pt + c.paper-dk2, fill: c.white, inset: 0pt)[
+  #block(width: 100%, fill: c.paper-dk, inset: (x: 8pt, y: 3pt), below: 0pt,
+    kicker(title, fill: c.steel-600, size: ts.xs + 0.4pt))
+  #block(inset: (x: 10pt, y: 9pt), above: 0pt, width: 100%, align(center, layout(size => {
+    let n = _rr-layout(diagram)
+    let lead = 12pt
+    let pad = 3pt
+    let w = n.w + 2 * lead + 2 * pad
+    let y = n.up + pad
+    let x0 = pad
+    let x1 = pad + lead + n.w + lead
+    // a grammar wider than the page is drawn smaller, never cut
+    let k = calc.min(1, size.width / w)
+    scale(k * 100%, reflow: true, box(width: w, height: n.up + n.down + 2 * pad, {
+      // start: two bars; end: one bar
+      _rr-line((x0, y - 5pt), (x0, y + 5pt))
+      _rr-line((x0 + 2.5pt, y - 5pt), (x0 + 2.5pt, y + 5pt))
+      _rr-line((x0 + 2.5pt, y), (x0 + lead, y))
+      for piece in (n.draw)(x0 + lead, y) { piece }
+      _rr-line((x0 + lead + n.w, y), (x1, y))
+      _rr-line((x1, y - 5pt), (x1, y + 5pt))
+    }))
+  })))
+]
+
 // ─── Appendices ────────────────────────────────────────────────────────────
 // `#show: appendices` before the first appendix: letters instead of numbers.
 #let in-appendix = state("isss-appendix", false)

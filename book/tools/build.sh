@@ -4,6 +4,10 @@
 # The flag is added as an incremental update; Typst's bytes are left as they are.
 set -e
 cd "$(dirname "$0")/.."
+# Figures are Graphviz sources; the rendered SVGs are committed so typst alone can build the book.
+if command -v dot >/dev/null; then
+  for f in figures/*.dot; do dot -Tsvg "$f" -o "${f%.dot}.svg"; done
+fi
 typst compile databases.typ "$@"
 python3 -I - <<'PY'
 from pypdf import PdfWriter

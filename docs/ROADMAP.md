@@ -194,3 +194,55 @@ Where to start:
   narrower: teach `loadtest` to replay a captured operation sequence (from a file) instead of only generating
   synthetic uniform-random traffic, so the tooling is ready the moment a real trace exists rather than needing to be
   built from scratch then.
+
+## 6. Records, tables, secondary indexes and a B-tree
+
+Everything so far is about the engine: opaque byte keys mapped to opaque byte values. The data model a user of a
+database expects is built above it, as layers that only call the engine's public API (`get`, `put`, `delete`, `fold`,
+`scan`), each in its own crate the way `yabiir-sql` is, so the engine stays small and none of them hold back its 1.0.
+`book/PLAN.md` introduces them in the order a query first needs them; this section is the engineering side of the
+same plan.
+
+- **Records** are the first layer: a value with named, typed attributes instead of bytes. That is a codec and a
+  schema. The codec encodes a record to a value and back; the schema names the attributes and their domains, and
+  rejects a record that doesn't fit. The engine is unchanged.
+- **Tables** sit on records: several relations in one store, each a key prefix (a table id in front of every key),
+  with its own schema and a primary key that maps to the engine's key. A sorted store then gives each table its own
+  ordered range for `scan`, and two tables' scans can be merged for `UNION`, `INTERSECT` and `EXCEPT`.
+- **Secondary indexes, in the manner of DynamoDB's GSIs**, sit on tables: an index is another key range, keyed by the
+  indexed attributes followed by the base table's primary key (so equal attribute values stay distinct), holding
+  either just that key or a projection of the record's attributes, as a GSI does. A query on an indexed attribute
+  becomes a `scan` of the index plus a `get` per match, or the scan alone when the projection covers the query.
+- **A B-tree variant** runs alongside the record layer: an ordered structure with its nodes as pages, as in Bayer and
+  McCreight, Comer and LMDB (all in `refs/`). It answers the same ordered questions as the sorted keydir, but on
+  disk instead of in memory.
+
+Two things here change the engine, and both should be settled before the layers depend on them.
+
+First, atomicity across keys. A record and its index entries are several keys, so an insert is several `put`s, and a
+crash between them leaves an index entry with no record or a record missing from its index. DynamoDB answers this by
+maintaining GSIs asynchronously and calling them eventually consistent. yabiir's single strict writer allows a
+stronger answer: a write batch, appended as one unit (one CRC over the whole batch, or a commit marker after it),
+published to the keydir in one critical section and replayed by recovery all or nothing. That is a change to the
+entry format and to recovery, and it is the same thing `UPDATE`'s read-modify-write needs.
+
+Second, where the B-tree sits. Built on the engine's API, with each node stored as a value, it inherits the log's
+crash safety and merge for free, and the keydir holds one small entry per node instead of every key, so memory no
+longer grows with the number and size of keys. Built beside the engine instead, as a second implementation of the
+`Bitcask` trait on its own page file (copy-on-write pages, as LMDB does), it is a real alternative storage design that
+every layer above could choose at open: append-only log against update-in-place pages, the contrast the book is
+about. The first is less work and closer to what this section sketches; the second is a larger project and the more
+instructive comparison. **Decision:** which one, or the first now and the second later.
+
+Where to start:
+
+- Records first, since everything else needs them: a codec crate with a schema type and an encoding that sorts the
+  way the attribute's domain does (order-preserving), so that a key built from attributes scans in attribute order.
+  Getting that encoding right is what makes tables' primary keys and index keys work with `scan` at all.
+- Then the write batch in the engine: `Engine::write_batch(&[Op])`, with model-test coverage of a crash in the middle
+  of one before anything uses it.
+- Tables and indexes after that, as a thin layer: a catalog (itself stored in the store, under a reserved prefix)
+  naming each table's id, schema and indexes, and an index maintained in the same batch as every write to its table.
+  Index backfill, for an index added to a table that already has rows, is a `scan` of the table writing batches.
+- `yabiir-sql` grows `FROM`, attribute projections and restrictions as each layer arrives, and its planner learns to
+  choose an index scan over a full scan.

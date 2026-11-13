@@ -12,7 +12,7 @@ use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::api::{Bitcask, Options};
@@ -50,17 +50,6 @@ pub struct Engine {
     /// (even when `sync_on_put` is off) since it's cheap and keeps `append`
     /// simple; only ever touched when `sync_on_put` is set.
     group_commit: GroupCommit,
-    /// Held *shared* by `put` and `delete` from appending their entry until
-    /// the keydir reflects it, and *exclusively* by `merge` only while it
-    /// reads which file is active to choose its inputs. So when merge chooses,
-    /// every entry in a file older than the active one is already published,
-    /// and merge's liveness check against the keydir is correct for all of
-    /// them — without it, merge could drop an entry appended but not yet
-    /// published, and remove its file (a lost write, or a deleted key come
-    /// back after reopen). Writes never wait on each other through this
-    /// gate; they wait only for the instant merge holds it, which is as long
-    /// as the writes already in progress take to publish.
-    publish_gate: RwLock<()>,
     next_file_id: AtomicU32,
     /// Resolved once at `open()` time from `opts.metrics` — `NoopMetrics`
     /// when the caller didn't provide one, so every call site can just
@@ -86,9 +75,20 @@ impl Engine {
         }
     }
 
-    /// Append `encoded` to the active file, rotating to a fresh active file
-    /// if the size threshold was crossed, per plan §4.2/§3.4. Returns the
-    /// `(file_id, value_pos)` the keydir entry should point at.
+    /// Append `encoded` to the active file, run `publish` with the
+    /// `(file_id, value_pos)` it landed at, then rotate to a fresh active
+    /// file if the size threshold was crossed, per plan §4.2/§3.4. Returns
+    /// the same `(file_id, value_pos)`.
+    ///
+    /// `publish` runs under `active`'s lock, so the keydir changes in the
+    /// same order the log does: there is one writer, and a write is one
+    /// critical section from append to publish. Two writes to the same key
+    /// can't publish out of log order (the session would read a value that
+    /// a reopen doesn't), and `merge`, which reads the active file's id under
+    /// this lock, never sees an entry in an older file that isn't published
+    /// yet. With `sync_on_put`, the fsync still happens after the lock is
+    /// released, so a write is visible to readers before its `put` returns
+    /// and before it is durable.
     ///
     /// Only ever called from `put`/`delete`/`merge`, all of which already
     /// call `require_write` first — `self.active` being `None` here would
@@ -106,7 +106,11 @@ impl Engine {
     /// so it reports that to the coordinator too, rather than leaving a
     /// writer who landed just before a rotation waiting on an unrelated
     /// fsync of the *new* active file.
-    fn append(&self, encoded: &format::EncodedEntry) -> Result<(u32, u64)> {
+    fn append(
+        &self,
+        encoded: &format::EncodedEntry,
+        publish: impl FnOnce(u32, u64),
+    ) -> Result<(u32, u64)> {
         let active_lock = self
             .active
             .as_ref()
@@ -116,6 +120,7 @@ impl Engine {
                 .lock()
                 .expect("Active file access no loner safe (mutex poisoned); exiting");
             let (file_id, value_pos, _total_len) = active.append(encoded)?;
+            publish(file_id, value_pos);
             let target_gen = self
                 .group_commit
                 .record_pending();
@@ -171,9 +176,9 @@ impl Engine {
     }
 
     /// [`Bitcask::put`], with `between_append_and_publish` run after the entry
-    /// is appended and before the keydir points at it. Production passes a
-    /// no-op; tests run a `merge` there, the window in which a merge could
-    /// treat the not-yet-published entry as dead and remove its file.
+    /// is appended and before the keydir points at it, under the append lock.
+    /// Production passes a no-op; tests try to run a `merge` or another write
+    /// there, and check that it has to wait until the publish is done.
     fn put_with_hook(
         &self,
         key: &[u8],
@@ -187,31 +192,28 @@ impl Engine {
         self.require_write()?;
         let start = Instant::now();
 
-        let _publishing = self
-            .publish_gate
-            .read()
-            .expect("Publish gate no longer safe (RW lock poisoned); exiting");
         let encoded = format::encode_entry(key, value, false, timestamp);
-        let (file_id, value_pos) = self.append(&encoded)?;
-        between_append_and_publish();
-        self.keydir
-            .insert(
-                key,
-                KeydirEntry {
-                    file_id,
-                    value_size: value.len() as u32,
-                    value_pos,
-                    timestamp,
-                },
-            );
+        self.append(&encoded, |file_id, value_pos| {
+            between_append_and_publish();
+            self.keydir
+                .insert(
+                    key,
+                    KeydirEntry {
+                        file_id,
+                        value_size: value.len() as u32,
+                        value_pos,
+                        timestamp,
+                    },
+                );
+        })?;
         self.metrics
             .record_put(start.elapsed());
         Ok(())
     }
 
     /// [`Bitcask::delete`], with `between_append_and_publish` run after the
-    /// tombstone is appended and before the key leaves the keydir — the same
-    /// window as [`Engine::put_with_hook`].
+    /// tombstone is appended and before the key leaves the keydir, under the
+    /// append lock — the same window as [`Engine::put_with_hook`].
     fn delete_with_hook(
         &self,
         key: &[u8],
@@ -233,15 +235,12 @@ impl Engine {
                 .record_delete(start.elapsed());
             return Ok(()); // deleting a non-existent key is a no-op
         }
-        let _publishing = self
-            .publish_gate
-            .read()
-            .expect("Publish gate no longer safe (RW lock poisoned); exiting");
         let encoded = format::encode_entry(key, &[], true, timestamp);
-        self.append(&encoded)?;
-        between_append_and_publish();
-        self.keydir
-            .remove(key);
+        self.append(&encoded, |_, _| {
+            between_append_and_publish();
+            self.keydir
+                .remove(key);
+        })?;
         self.metrics
             .record_delete(start.elapsed());
         Ok(())
@@ -391,7 +390,6 @@ impl Engine {
             &self.keydir,
             &self.files,
             active_lock,
-            &self.publish_gate,
             &self.group_commit,
             &self.next_file_id,
             self.opts
@@ -458,7 +456,6 @@ impl Bitcask for Engine {
             keydir: SharedKeydir::new(keydir),
             active,
             group_commit: GroupCommit::new(),
-            publish_gate: RwLock::new(()),
             next_file_id: AtomicU32::new(next_id + 1),
             metrics,
             opts,
@@ -503,7 +500,6 @@ impl Bitcask for Engine {
             &self.keydir,
             &self.files,
             active_lock,
-            &self.publish_gate,
             &self.group_commit,
             &self.next_file_id,
             self.opts
@@ -1142,6 +1138,95 @@ mod tests {
                 .get(b"K")
                 .unwrap(),
             None
+        );
+    }
+
+    /// Runs `write` on another thread from inside a write's
+    /// append-to-publish window, and gives it up to a second to finish
+    /// *inside* that window — the same verdict-by-timeout as
+    /// `merge_inside_window`. The first write holds the append lock through
+    /// its publish, so the second can't even append until the first has
+    /// published: the wait times out and it lands after. If the publish ever
+    /// moved back outside the lock, the second write would append after the
+    /// first and publish before it.
+    fn write_inside_window<'scope, 'env>(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        write: impl FnOnce() + Send + 'scope,
+    ) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            write();
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+    }
+
+    /// Two puts of the same key, the second one entirely inside the first's
+    /// append-to-publish window. The log holds `v1` then `v2`, so `v2` is the
+    /// last write: it's what a reopen recovers. With the publish outside the
+    /// append lock, `v1` published last and overwrote `v2` in the keydir, so
+    /// the session read `v1` while the disk said `v2`.
+    #[test]
+    fn race_two_puts_publish_in_log_order() {
+        let dir = TempDir::new();
+        let db = open(&dir);
+
+        std::thread::scope(|scope| {
+            db.put_with_hook(b"K", b"v1", now_unix(), || {
+                write_inside_window(scope, || {
+                    db.put(b"K", b"v2", now_unix())
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        });
+
+        let in_session = db
+            .get(b"K")
+            .unwrap();
+        drop(db);
+        let after_reopen = open(&dir)
+            .get(b"K")
+            .unwrap();
+        assert_eq!(after_reopen, Some(b"v2".to_vec()), "the log's last write");
+        assert_eq!(
+            in_session, after_reopen,
+            "the keydir must agree with the log"
+        );
+    }
+
+    /// The same window, with a delete as the second write. The log holds
+    /// `v1` then a tombstone, so after a reopen the key is gone. With the
+    /// publish outside the append lock, `v1` published after the delete had
+    /// removed the key, and the session saw a deleted key come back.
+    #[test]
+    fn race_put_then_delete_publish_in_log_order() {
+        let dir = TempDir::new();
+        let db = open(&dir);
+        db.put(b"K", b"v0", now_unix())
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            db.put_with_hook(b"K", b"v1", now_unix(), || {
+                write_inside_window(scope, || {
+                    db.delete(b"K", now_unix())
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        });
+
+        let in_session = db
+            .get(b"K")
+            .unwrap();
+        drop(db);
+        let after_reopen = open(&dir)
+            .get(b"K")
+            .unwrap();
+        assert_eq!(after_reopen, None, "the log's last write is the tombstone");
+        assert_eq!(
+            in_session, after_reopen,
+            "the keydir must agree with the log"
         );
     }
 

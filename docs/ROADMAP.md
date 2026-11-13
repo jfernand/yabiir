@@ -87,20 +87,32 @@ Where to start:
 
 ## 3. Performance
 
-Everything tuned so far — dropping the active-file read lock, batching merge's flushes, sharing fsyncs across
-concurrent writers with group commit — attacked contention on the two locks the engine currently has: one `Mutex`
-around the active file, one `RwLock` around the whole keydir. Every write still serializes through that single
-active-file mutex no matter which key it touches, and every keydir mutation takes the same global write lock no
-matter which key either. Finer-grained concurrency control means sharding the keydir the way concurrent hash maps
-usually do, and possibly moving away from one single active file as the only write target, rather than continuing to
-optimize what happens inside that one lock.
+Bitcask's design fixes the shape of the write path: one writer process, one active file, every write an append, and
+the keydir updated after each append. Everything tuned so far made that one path cheaper without changing its shape:
+dropping the active-file read lock, batching merge's flushes, and group commit, which shares fsyncs across
+concurrent writers. That is the rule for what comes next too. Sharding the keydir and writing to more than one
+active file are out of scope: both would end the single total order of writes that recovery, merge and the keydir
+all rely on, for throughput no benchmark has shown yabiir needs.
 
-The I/O path itself is still plain synchronous `pread`/`write` syscalls, one blocking call at a time. `io_uring`
-would let writes and reads be submitted without blocking a thread per call, which matters most exactly where group
-commit already showed the biggest win: many concurrent writers. `mmap`-backed reads would let the OS's page cache
-serve reads directly instead of `DataFileSet::read_at` allocating and copying into a fresh `Vec<u8>` on every call —
-real gains, but real complexity too, since mmap's failure modes (a `SIGBUS` on a truncated or corrupted backing file)
-are a different, harder kind of thing to reason about than a `Result` from a syscall.
+The I/O calls underneath that path are a different matter, because they can change without changing its shape.
+The path is still plain synchronous `pread`/`write` syscalls, one blocking call at a time. `io_uring` would let writes
+and reads be submitted without blocking a thread per call, which matters most exactly where group commit already
+showed the biggest win: many concurrent writers. `mmap`-backed reads would let the OS's page cache serve reads directly
+instead of `DataFileSet::read_at` allocating and copying into a fresh `Vec<u8>` on every call. Both can stay
+contained: `io_uring` behind the active file's append and sync, and `mmap` behind `read_at`, on immutable closed files
+only, where nothing truncates or rewrites the mapping. That still leaves mmap's harder failure mode (a `SIGBUS` on a
+corrupted or vanished backing file, instead of a `Result`) and the larger-than-memory stalls described in
+`docs/reading-databases.pdf` §24, so either one should sit behind a feature flag next to the plain path, not replace
+it.
+
+The single writer is now strict. A put or delete appends and updates the keydir in one critical section under the
+active-file mutex (`Engine::append` takes the publish as a closure), so the keydir changes in log order, as the
+paper's keydir is "atomically updated with the location of the newest data". The `race_*_publish_in_log_order` tests
+in `engine.rs` pin it down; before the change, the session could read an older value than a reopen would restore,
+or see a deleted key come back. The separate publish gate that kept merge from choosing inputs mid-publish went away
+with it, since the mutex now does that job. One consequence: with `sync_on_put`, the fsync still runs after the mutex
+is released (group commit), so a write becomes visible to readers just before it is durable and before its `put`
+returns.
 
 Tail latency is the thread connecting all of this, and it isn't finished: the merge-batched-flushing report already
 notes that pass duration climbs over a sustained run, because more data accumulates between merges than the
@@ -110,17 +122,13 @@ above, looked at from the latency side rather than the correctness side.
 
 Where to start:
 
-- Keydir sharding is the more contained of the two concurrency options: replace `SharedKeydir`'s single
-  `RwLock<Keydir>` with a fixed number of `RwLock<Keydir>` shards partitioned by a cheap hash of the key (16 or 32
-  shards is a reasonable default to start benchmarking from) — a well-understood pattern with existing prior art
-  (`dashmap`) to compare against directly.
-- Defer multiple active files until sharding alone is shown insufficient by an actual benchmark — it's a much larger,
-  structural change that touches on-disk file-id assignment, merge's input-file selection, and recovery ordering, not
-  something to assume is necessary up front.
-- Don't adopt `io_uring` or `mmap` as the first move either: consistent with how every other performance fix here
-  started (profile, then fix what profiling actually shows), run `loadtest`/flamegraph under enough concurrent I/O
-  pressure to confirm syscall overhead is really the bottleneck first — `tokio-uring` or the `io-uring` crate for the
-  write path, `memmap2` for reads, if it is.
+- Measure what the wider (now strict) critical section costs with `loadtest` at high writer counts. It adds one keydir insert to a
+  section that already holds a `write()` syscall; the fsync stays outside it, via group commit.
+- Don't adopt `io_uring` or `mmap` as the first move: consistent with how every other performance fix here started
+  (profile, then fix what profiling actually shows), run `loadtest`/flamegraph under enough concurrent I/O pressure to
+  confirm syscall overhead or the read copy is really the bottleneck first — the `io-uring` crate for the write path,
+  `memmap2` for reads, if it is. Keep each behind a feature flag and the existing `DataFileSet`/`ActiveFile`
+  boundaries, so the plain `pread`/`write` path stays the default and the model test runs against both.
 - Try incremental, resumable merge (process a bounded number of input files or entries per call, resumable across
   calls) before either full backpressure or a scheduler rewrite — it's the smallest of the tail-latency options,
   contained entirely within `merge/mod.rs`.

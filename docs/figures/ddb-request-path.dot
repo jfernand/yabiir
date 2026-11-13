@@ -1,0 +1,31 @@
+// A DynamoDB write, from §3 of the 2022 paper: a request router looks up the
+// partition, the leader appends a write-ahead log record, and the write is
+// acknowledged once a quorum of the replication group has it.
+// Rendered to ddb-request-path.svg by: dot -Tsvg ddb-request-path.dot -o ddb-request-path.svg
+digraph path {
+  graph [bgcolor="transparent", rankdir=TB, nodesep=0.3, ranksep=0.35, pad=0.05, compound=true];
+  node  [shape=box, style="filled", fillcolor="#FAFAF8", color="#3A3A3A", penwidth=0.9,
+         fontname="IBM Plex Mono", fontsize=8.5, fontcolor="#1A1A1A", margin="0.09,0.05"];
+  edge  [color="#3A3A3A", penwidth=0.9, arrowsize=0.55, fontname="IBM Plex Mono", fontsize=7, fontcolor="#4A4A4A"];
+
+  app    [label="application\nPutItem(k, item)", shape=box, style="rounded,filled"];
+  router [label="request router\nauth (cached IAM/KMS)\nGAC tokens"];
+  meta   [label="metadata\n(MemDS)\nkey → partition"];
+
+  subgraph cluster_group {
+    label="replication group for k's partition: three AZs, Multi-Paxos";
+    fontname="IBM Plex Mono"; fontsize=7.5; fontcolor="#4A4A4A";
+    color="#888888"; style="dashed";
+    leader [label="leader (AZ 1)\nWAL + B-tree", fillcolor="#FFE280", color="#C98A00", penwidth=1.4];
+    f1     [label="replica (AZ 2)\nWAL + B-tree"];
+    f2     [label="replica (AZ 3)\nWAL + B-tree"];
+  }
+  s3 [label="S3\narchived WAL"];
+
+  app -> router;
+  router -> meta [dir=both, arrowtail=normal, label="lookup"];
+  router -> leader [label="route"];
+  leader -> f1 [label="log record"];
+  leader -> f2 [label="log record"];
+  f2 -> s3 [style=dashed, ltail=cluster_group, label="archive WAL"];
+}

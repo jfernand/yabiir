@@ -91,7 +91,7 @@ impl fmt::Debug for Options {
 ///
 /// A `Bitcask` instance is a directory of append-only data files plus an
 /// in-memory index (the "keydir") mapping each live key to the location of
-/// its newest value. See `docs/papers/bitcask-intro.pdf` and
+/// its newest value. See `refs/bitcask-intro.pdf` and
 /// `docs/bitcask-implementation-plan.md` for the full design this trait is
 /// derived from.
 ///

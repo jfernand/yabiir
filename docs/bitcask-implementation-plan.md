@@ -1,6 +1,6 @@
 # Bitcask Implementation Plan (Rust)
 
-Source: `docs/papers/bitcask-intro.pdf` ("Bitcask: A Log-Structured Hash Table for
+Source: `refs/bitcask-intro.pdf` ("Bitcask: A Log-Structured Hash Table for
 Fast Key/Value Data", Sheehy & Smith, Basho, 2010).
 
 This plan breaks the paper's design into buildable milestones for a from-scratch

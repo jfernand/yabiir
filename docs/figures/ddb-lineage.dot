@@ -1,0 +1,26 @@
+// Where DynamoDB and Bitcask come from: two branches of the 2007 Dynamo design.
+// Rendered to ddb-lineage.svg by: dot -Tsvg ddb-lineage.dot -o ddb-lineage.svg
+digraph lineage {
+  graph [bgcolor="transparent", rankdir=LR, nodesep=0.25, ranksep=0.42, pad=0.05];
+  node  [shape=box, style="filled", fillcolor="#FAFAF8", color="#3A3A3A", penwidth=0.9,
+         fontname="IBM Plex Mono", fontsize=9, fontcolor="#1A1A1A", margin="0.10,0.05"];
+  edge  [color="#3A3A3A", penwidth=0.9, arrowsize=0.6, fontname="IBM Plex Mono", fontsize=7.5, fontcolor="#4A4A4A"];
+
+  rdbms   [label="relational DBs\nat Amazon"];
+  dynamo  [label="Dynamo\nSOSP 2007\nself-run, per team"];
+  simpledb[label="SimpleDB\n2007\nmanaged, indexes all"];
+  ddb     [label="DynamoDB\n2012\nmanaged, key + few indexes", fillcolor="#FFE280", color="#C98A00", penwidth=1.4];
+  txn     [label="DynamoDB transactions\n2018 (ATC 2023)"];
+  riak    [label="Riak (Basho)\nDynamo-style cluster"];
+  bitcask [label="Bitcask\n2010\nRiak's local engine"];
+  yabiir  [label="yabiir\nBitcask in Rust", fillcolor="#FFE280", color="#C98A00", penwidth=1.4];
+
+  rdbms -> dynamo  [label="primary-key access only"];
+  rdbms -> simpledb[label="managed tables"];
+  dynamo -> ddb    [label="scale, predictability"];
+  simpledb -> ddb  [label="operations, table model"];
+  ddb -> txn;
+  dynamo -> riak   [label="the paper, reimplemented"];
+  riak -> bitcask  [label="pluggable storage"];
+  bitcask -> yabiir;
+}

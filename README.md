@@ -3,7 +3,7 @@
 [![CI](https://github.com/jfernand/yabiir/actions/workflows/ci.yml/badge.svg)](https://github.com/jfernand/yabiir/actions/workflows/ci.yml)
 
 Yet another Bitcask implementation, in Rust — a log-structured hash-table key/value store, built from scratch following
-Sheehy & Smith's 2010 paper (included locally at [`docs/papers/bitcask-intro.pdf`](docs/papers/bitcask-intro.pdf)).
+Sheehy & Smith's 2010 paper (included locally at [`refs/bitcask-intro.pdf`](refs/bitcask-intro.pdf)).
 
 > **Status: not yet battle-tested.** Covered by tests (unit, integration, a property-based model test, and
 > concurrency stress tests), but this hasn't run in production anywhere. See [Known limitations](#known-limitations)

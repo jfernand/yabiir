@@ -1,0 +1,32 @@
+// An LMDB write transaction (txn 8) changing one key, after the LDAPCon 2011 paper §4.1–4.2:
+// the leaf and every page on its path to the root are copied, the old pages go on the
+// free list under txn 8, and the commit writes the older of the two meta pages last.
+// A reader that began at txn 7 still walks the old pages.
+// Rendered to lmdb-cow-commit.svg by: dot -Tsvg lmdb-cow-commit.dot -o lmdb-cow-commit.svg
+digraph cow {
+  graph [bgcolor="transparent", rankdir=TB, nodesep=0.28, ranksep=0.38, pad=0.05];
+  node  [shape=box, style="filled", fillcolor="#FAFAF8", color="#3A3A3A", penwidth=0.9,
+         fontname="IBM Plex Mono", fontsize=8.5, fontcolor="#1A1A1A", margin="0.08,0.04"];
+  edge  [color="#3A3A3A", penwidth=0.9, arrowsize=0.55, fontname="IBM Plex Mono", fontsize=7, fontcolor="#4A4A4A"];
+
+  m0 [label="meta page 0\ntxn 7\ndata root → p10\nfree root → …"];
+  m1 [label="meta page 1\ntxn 8 (written last)\ndata root → p21\nfree root → p23", fillcolor="#FFE280", color="#C98A00", penwidth=1.4];
+  reader [label="reader slot\ntxn 7", shape=box, style="rounded,filled", fillcolor="#E5E5E5"];
+
+  p10 [label="p10 root (txn 7)"];
+  p11 [label="p11 branch"];
+  p12 [label="p12 leaf"];
+  p13 [label="p13 leaf: k = old"];
+
+  p21 [label="p21 root (txn 8)", fillcolor="#FFE280", color="#C98A00", penwidth=1.4];
+  p22 [label="p22 branch", fillcolor="#FFE280", color="#C98A00", penwidth=1.4];
+  p24 [label="p24 leaf: k = new", fillcolor="#FFE280", color="#C98A00", penwidth=1.4];
+  p23 [label="p23 free-list record\ntxn 8 freed {p10, p11, p13}", fillcolor="#FFF4CC", color="#C98A00"];
+
+  reader -> m0 [style=dashed];
+  m0 -> p10; p10 -> p11; p11 -> p12; p11 -> p13;
+  m1 -> p21; p21 -> p22; p22 -> p12 [label="shared"]; p22 -> p24;
+  m1 -> p23 [style=dashed];
+  {rank=same; m0; m1;}
+  {rank=same; p10; p21;}
+}

@@ -25,8 +25,13 @@
 //! Before measuring it warns about settings that make the clock drift
 //! (turbo boost, a governor other than `performance`, an online hyperthread
 //! sibling of the pinned core) and records them in the history file.
+//!
+//! `cargo xtask campaign` measures several versions interleaved, one
+//! benchmark on every version before the next, in sessions of a given
+//! length (`campaign run 30m`) until all are measured: see `campaign.rs`.
 
 mod bench;
+mod campaign;
 mod machine;
 
 use std::process::{Command, ExitCode};
@@ -43,6 +48,11 @@ fn main() -> ExitCode {
                 .collect::<Vec<_>>(),
         )),
         Some("bench-table") => report(bench::table()),
+        Some("campaign") => report(campaign::campaign(
+            &std::env::args()
+                .skip(2)
+                .collect::<Vec<_>>(),
+        )),
         Some(other) => {
             eprintln!("unknown task {other:?}\n{USAGE}");
             ExitCode::FAILURE
@@ -59,7 +69,9 @@ const USAGE: &str = "usage: cargo xtask <task>\n\navailable tasks:\n  \
     push it, triggering the crates.io publish workflow\n  \
     bench [REF..] run the Criterion benches (of the working tree, or of each \
     REF) and record the medians in bench-history/\n  \
-    bench-table   print the recorded medians, one column per version";
+    bench-table   print the recorded medians, one column per version\n  \
+    campaign      measure several versions interleaved, a time budget at a \
+    time: campaign new [--cpu N] [--rounds R] REF.. | run 30m | status";
 
 fn run_release() -> ExitCode {
     report(release())

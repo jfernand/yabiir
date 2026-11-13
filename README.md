@@ -116,6 +116,11 @@ Full design writeups — including the profiling methodology and measured before
   `bench-history/`; `cargo xtask bench-table` prints them side by side.
   It warns first about settings that make the clock drift (turbo boost, the frequency governor, an online hyperthread
   sibling of the pinned core) and records them with the numbers.
+- `cargo xtask campaign new --cpu 6 [--rounds R] REF…` plans the same measurement for several versions at once,
+  interleaved: each benchmark is measured on every version, in a shuffled order, before the next, so the clock's drift
+  reaches every version alike. `cargo xtask campaign run 30m` measures for that long and stops between units (or, at
+  the deadline, inside one, which is measured again later); further sessions carry on, and the last one writes
+  `bench-history/`. `cargo xtask campaign status` shows what is left.
 
 ## Observability
 

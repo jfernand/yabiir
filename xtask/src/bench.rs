@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use crate::machine::Machine;
 
 /// Where the recorded medians live, one JSON file per measured version.
-const HISTORY_DIR: &str = "bench-history";
+pub(crate) const HISTORY_DIR: &str = "bench-history";
 
 pub(crate) fn bench(args: &[String]) -> Result<(), String> {
     let root = repo_root()?;
@@ -149,7 +149,7 @@ fn measure(
 
 /// Find every `<bench dir>/<label>/` under Criterion's home and take the
 /// median (with its 95% interval) and mean from its `estimates.json`.
-fn collect(dir: &Path, label: &str, out: &mut Map<String, Value>) -> Result<(), String> {
+pub(crate) fn collect(dir: &Path, label: &str, out: &mut Map<String, Value>) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -283,7 +283,7 @@ fn working_tree_label() -> Result<String, String> {
 }
 
 /// The `[[bench]]` targets of yabiir as checked out at `tree`.
-fn bench_names(tree: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn bench_names(tree: &Path) -> Result<Vec<String>, String> {
     let out = command_out(
         Command::new("cargo")
             .current_dir(tree)
@@ -321,7 +321,7 @@ fn bench_names(tree: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn cpu_model() -> Option<String> {
+pub(crate) fn cpu_model() -> Option<String> {
     fs::read_to_string("/proc/cpuinfo")
         .ok()?
         .lines()
@@ -333,15 +333,15 @@ fn cpu_model() -> Option<String> {
         })
 }
 
-fn repo_root() -> Result<PathBuf, String> {
+pub(crate) fn repo_root() -> Result<PathBuf, String> {
     git_out(Path::new("."), &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
     git_out(dir, args).map(drop)
 }
 
-fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
     command_out(
         Command::new("git")
             .current_dir(dir)
@@ -349,7 +349,7 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
     )
 }
 
-fn command_out(cmd: &mut Command) -> Result<String, String> {
+pub(crate) fn command_out(cmd: &mut Command) -> Result<String, String> {
     let output = cmd
         .output()
         .map_err(|e| format!("failed to run {cmd:?}: {e}"))?;
@@ -367,12 +367,12 @@ fn command_out(cmd: &mut Command) -> Result<String, String> {
         .to_string())
 }
 
-fn read_json(path: &Path) -> Result<Value, String> {
+pub(crate) fn read_json(path: &Path) -> Result<Value, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
 }
 
-fn path_str(path: &Path) -> Result<&str, String> {
+pub(crate) fn path_str(path: &Path) -> Result<&str, String> {
     path.to_str()
         .ok_or_else(|| format!("non-UTF-8 path {}", path.display()))
 }

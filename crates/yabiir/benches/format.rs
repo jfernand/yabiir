@@ -69,7 +69,7 @@ fn bench_read_entry(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &encoded, |b, encoded| {
             b.iter(|| {
                 let mut cursor = Cursor::new(black_box(encoded.as_slice()));
-                black_box(read_entry(&mut cursor).unwrap())
+                black_box(read_entry(&mut cursor, encoded.len() as u64).unwrap())
             });
         });
     }

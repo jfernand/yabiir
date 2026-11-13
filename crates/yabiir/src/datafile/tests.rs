@@ -297,3 +297,30 @@ fn parse_data_file_id_requires_both_correct_length_and_all_digits() {
     );
     assert_eq!(parse_data_file_id("not-a-data-file.txt"), None);
 }
+
+#[test]
+fn a_scan_stops_at_a_header_claiming_more_than_the_file_holds() {
+    let dir = TempDir::new();
+    let good = format::encode_entry(b"key", b"value", false, 0).into_bytes();
+    let mut torn = format::encode_entry(b"next", b"value", false, 0).into_bytes();
+    torn[12..16].copy_from_slice(&u32::MAX.to_le_bytes()); // value_size
+    let path = DataFileSet::data_path(&dir, 1);
+    fs::write(&path, [good.as_slice(), torn.as_slice()].concat()).unwrap();
+
+    let scanned: Vec<Scanned> = scan(&path)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+
+    assert_eq!(scanned.len(), 2, "got {scanned:?}");
+    assert!(
+        matches!(&scanned[0], Scanned::Entry { offset: 0, entry } if entry.key == b"key"),
+        "got {:?}",
+        scanned[0]
+    );
+    assert!(
+        matches!(scanned[1], Scanned::Truncated { offset } if offset == good.len() as u64),
+        "got {:?}",
+        scanned[1]
+    );
+}

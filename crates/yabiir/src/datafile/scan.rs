@@ -22,9 +22,17 @@ pub(crate) enum Scanned {
 /// Every entry of the data file at `path`, in file order, tombstones
 /// included. The file is read through a buffer, one entry at a time, so a
 /// scan holds one entry in memory, not the file.
+///
+/// The file's length is taken when the scan starts. Recovery and merge only
+/// scan files nothing is writing to, so it stays put.
 pub(crate) fn scan(path: &Path) -> io::Result<Scan> {
+    let file = File::open(path)?;
+    let len = file
+        .metadata()?
+        .len();
     Ok(Scan {
-        reader: BufReader::with_capacity(SCAN_BUFFER_SIZE, File::open(path)?),
+        reader: BufReader::with_capacity(SCAN_BUFFER_SIZE, file),
+        len,
         offset: 0,
         is_done: false,
     })
@@ -34,6 +42,8 @@ const SCAN_BUFFER_SIZE: usize = 256 * 1024;
 
 pub(crate) struct Scan {
     reader: BufReader<File>,
+    /// The file's length when the scan started.
+    len: u64,
     /// Where the next entry starts.
     offset: u64,
     is_done: bool,
@@ -47,7 +57,10 @@ impl Iterator for Scan {
             return None;
         }
         let offset = self.offset;
-        let scanned = match format::read_entry(&mut self.reader) {
+        let available = self
+            .len
+            .saturating_sub(offset);
+        let scanned = match format::read_entry(&mut self.reader, available) {
             Err(e) => {
                 self.is_done = true;
                 return Some(Err(e));

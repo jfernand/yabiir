@@ -8,6 +8,22 @@
 //! documented in README.md's Releasing section: tag the current commit
 //! `vX.Y.Z` (from `yabiir`'s own `Cargo.toml` version) and push that tag,
 //! which triggers `.github/workflows/publish.yml`.
+//!
+//! `cargo xtask bench [REF...]` runs the Criterion suites and records their
+//! medians in `bench-history/<label>.json`, one file per measured version,
+//! committed so the history survives `cargo clean` and travels with the
+//! repo. With no REF it measures the working tree; with REFs (tags, commits)
+//! it checks each out in a throwaway worktree and runs *that* version's own
+//! benches. Each run is also kept as a named Criterion baseline in
+//! `target/criterion` (`--baseline <label>` compares against it later).
+//! `cargo xtask bench-table` prints the recorded medians side by side.
+//!
+//! The numbers only compare across runs on one machine, idle, on AC power;
+//! pin the measurement to one performance core for less noise, e.g.
+//! `cargo xtask bench --cpu 6 v0.6.0` (it builds on every core, then
+//! measures under `taskset -c 6`).
+
+mod bench;
 
 use std::process::{Command, ExitCode};
 
@@ -17,6 +33,12 @@ fn main() -> ExitCode {
         .as_deref()
     {
         Some("release") => run_release(),
+        Some("bench") => report(bench::bench(
+            &std::env::args()
+                .skip(2)
+                .collect::<Vec<_>>(),
+        )),
+        Some("bench-table") => report(bench::table()),
         Some(other) => {
             eprintln!("unknown task {other:?}\n{USAGE}");
             ExitCode::FAILURE
@@ -29,11 +51,18 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage: cargo xtask <task>\n\navailable tasks:\n  \
-    release   tag the current commit vX.Y.Z (from Cargo.toml) and push \
-    it, triggering the crates.io publish workflow";
+    release       tag the current commit vX.Y.Z (from Cargo.toml) and \
+    push it, triggering the crates.io publish workflow\n  \
+    bench [REF..] run the Criterion benches (of the working tree, or of each \
+    REF) and record the medians in bench-history/\n  \
+    bench-table   print the recorded medians, one column per version";
 
 fn run_release() -> ExitCode {
-    match release() {
+    report(release())
+}
+
+fn report(result: Result<(), String>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("error: {msg}");
@@ -69,7 +98,7 @@ fn release() -> Result<(), String> {
 
 /// Read `yabiir`'s own version from `cargo metadata`, not xtask's — both
 /// are workspace members, so `--no-deps` alone isn't enough to disambiguate.
-fn yabiir_version() -> Result<String, String> {
+pub(crate) fn yabiir_version() -> Result<String, String> {
     let output = Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .output()
@@ -97,7 +126,7 @@ fn yabiir_version() -> Result<String, String> {
         .ok_or_else(|| "could not find yabiir's version in cargo metadata output".to_string())
 }
 
-fn working_tree_is_clean() -> Result<bool, String> {
+pub(crate) fn working_tree_is_clean() -> Result<bool, String> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
         .output()
@@ -117,7 +146,7 @@ fn tag_exists(tag: &str) -> Result<bool, String> {
         .is_empty())
 }
 
-fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
+pub(crate) fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(cmd)
         .args(args)
         .status()

@@ -11,7 +11,7 @@ members = ["crates/*", "xtask"]
 resolver = "3"
 
 [workspace.dependencies]
-yabiir = { path = "crates/yabiir", version = "0.7.0" }
+yabiir = { path = "crates/yabiir", version = "0.8.0" }
 yabiir-testutil = { path = "crates/yabiir-testutil" }
 clap = { version = "4.6.6", features = ["derive"] }
 

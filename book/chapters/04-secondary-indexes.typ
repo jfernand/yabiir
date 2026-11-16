@@ -2,8 +2,8 @@
 
 = Secondary Indices <ch-secondary>
 
-#status[Incipient. The idea and its costs are stated; nothing is designed in detail, and the
-consistency story is open.]
+#status[Incipient. The idea and its costs are stated. yabiir 0.9 has the atomic write batch that keeps
+a record and its index entries consistent; the index layer that uses it isn't built.]
 
 A mailbox stored by `(account, mailbox, uid)` lists its messages in UID order, and an email
 program's search asks for them by sender and by date. Without another index it answers those by
@@ -45,8 +45,8 @@ Every index makes reads cheaper and writes more expensive:
     writes.],
   [Read before write], [Changing an indexed field means deleting the old index entry, so the old
     record has to be read first to know what it was.],
-  [Consistency], [The record and its index entries are separate writes. A crash between them leaves
-    them disagreeing, until a transaction, a write order or a rebuild puts them back.],
+  [Consistency], [The record and its index entries are separate keys. Written one `put` at a time,
+    a crash between them leaves them disagreeing; written as one batch, they can't.],
 )
 
 #note(title: "Rebuildable or not")[
@@ -54,6 +54,56 @@ Every index makes reads cheaper and writes more expensive:
   table. A store that holds the only copy of its data can't, and that's where transactions start to
   pay for their complexity.
 ]
+
+== Atomic write batches
+
+A _write batch_ is a list of writes that the store applies together or not at all. yabiir's has a
+third kind of operation beside the put and the delete, a _check_, which writes nothing and fails the
+whole batch unless its key meets a condition #since("0.9"):
+
+#srcfile("batch.rs", tag: "v0.9.0", root: "crates/yabiir/src/", lines: ((19, 25), (30, 37)))[```rust
+pub enum Op {
+    /// Store `value` under `key`.
+    Put { key: Vec<u8>, value: Vec<u8> },
+    /// Remove `key`. Removing a key that isn't there does nothing.
+    Delete { key: Vec<u8> },
+    /// Write nothing, but fail the whole batch unless `key` meets `cond`.
+    Check { key: Vec<u8>, cond: Cond },
+// …
+pub enum Cond {
+    /// The key has no value.
+    Absent,
+    /// The key has a value.
+    Exists,
+    /// The key has a value, and its version is exactly this one (see
+    /// [`Engine::get_versioned`](crate::Engine::get_versioned)).
+    Version(u64),
+```]
+
+`Engine::write_batch` takes a `Vec<Op>` and returns a `Commit`, which says how the batch ended. Every
+check is evaluated first, against the store as it was just before the batch; if one fails, nothing is
+written and the commit reports the check's position. On disk the batch is one record under one CRC,
+so recovery replays all of it or none of it: a crash in the middle of the append leaves a record cut
+short, which recovery drops like any torn write.#footnote[yabiir's tests cut the file at every byte
+of a batch's record and reopen it: the store holds the whole batch or nothing of it. The test is
+`a_batch_cut_anywhere_by_a_crash_recovers_whole_or_not_at_all`, in
+#repo("crates/yabiir/src/engine/tests/batches.rs").]
+
+Two of the three costs change with a batch; the writes are as many as before. A new message goes in as
+one batch: the record and an entry in each index, so no crash leaves an index entry without its
+record. The read before a write gets a guard: every write gives the keys it puts a new _version_, the write's sequence
+number in the log, which `Engine::get_versioned` returns with the value. A change of date reads the
+record and its version, then writes one batch: a check that the record's version is still the one it
+read, the new record, a delete of the old `by_date` entry and a put of the new one. If another writer
+changed the record in between, the check fails, nothing is written, and the change starts again from
+a fresh read.
+
+A version is never handed out twice, not even to a key that was deleted and written again, so the
+check can't mistake a recreated record for the one that was read.#footnote[A version that restarted
+at 1 on every recreate would let a stale check pass: read version 1, someone deletes and recreates the
+record, and `Version(1)` matches the new one. yabiir's versions come from one counter for the whole
+store, and survive merge and reopen: merge writes the counter's value into every file it creates,
+so the versions of the deleted keys it drops are still accounted for.]
 
 == Inverted indices
 
@@ -90,11 +140,14 @@ That's a secondary index: one more table, paid for on every write.
   [A secondary index maps a field's value to primary keys; in a sorted store it's one more table.],
   [It gives that field every ordered operation: ranges, prefixes, newest N.],
   [Each index costs a write per `put`, a read before each update, and a consistency story.],
+  [An atomic batch with a version check keeps a record and its index entries consistent, through
+   crashes and concurrent writers.],
   [An inverted index is a secondary index with an entry per word; queries intersect its postings.],
 )
 
 #todo(
   [Where index maintenance lives: declared in the table layer, or written by the application.],
-  [One consistency story — write order plus rebuild, or a minimal transaction — chosen and built.],
+  [An index layer on `write_batch`: the record and its entries in one batch, updates guarded by
+   `Cond::Version`, measured against one `put` per key.],
   [An inverted index built for real over the Bluesky firehose posts that `gulp` stores.],
 )

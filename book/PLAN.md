@@ -45,7 +45,8 @@ Open decisions are marked **Decision:**.
   operators < ≤ > ≥ on the key.
 - **yabiir needs:** an ordered keydir and `scan(range)` — the `BTreeMap` change, `yabiir-btree`.
 - **Old material:** the current Chapter 2 (sorted indices, range scans) belongs here.
-- **Status:** yabiir 0.6.0 has the ordered keydir (`KeyOrder::Sorted`) and `Engine::scan`;
+- **Status:** yabiir 0.6.0 has the ordered keydir (`KeyOrder::Sorted`) and `Engine::scan`, and 0.9
+  `Engine::scan_page` (a page of a range, either direction);
   Chapter 2 (sorted indices) explains it, and Chapter 3 ("From SQL to get/scan") parses
   `BETWEEN` and plans it as a range scan.
 
@@ -117,7 +118,10 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 
 Not an operator: the fix for step 4's slow σ on non-key attributes.
 
-- **yabiir needs:** an index table per indexed attribute, maintained on every write.
+- **yabiir needs:** an index table per indexed attribute, maintained on every write — in the same
+  `write_batch` as the record (0.9), so a crash can't separate them.
+- **Status:** Chapter 4 states the costs and, since 0.9, the atomic batch and version check that keep
+  an index consistent; the index layer itself isn't built.
 - **Old material:** the current Chapter 3 belongs here, after DML has introduced writes (it needs
   them: an index has to be maintained on insert, update and delete).
 - **Decision:** before or after Part 2. Before is shorter; after lets index maintenance use the DML
@@ -138,8 +142,9 @@ the engine does, and ends at the set-at-a-time form.
 - **The point:** `INSERT` and `put` are not the same. `put` overwrites; `INSERT` must *fail* if the key
   exists — the primary key is the identity of the tuple, and a relation can't hold two with the same
   key (*entity integrity*, Codd).
-- **yabiir needs:** an insert-if-absent: `get` then `put` under the write lock, or a new
-  `put_if_absent`. The book builds the first and shows why it races without the lock.
+- **yabiir needs:** an insert-if-absent. yabiir 0.9 has it: a `write_batch` of
+  `Op::Check { cond: Cond::Absent }` and the `Op::Put`. The book shows first why `get` then `put`
+  races, then the batch that doesn't.
 
 ### D2. `DELETE` — by key, then by condition
 
@@ -153,9 +158,10 @@ the engine does, and ends at the set-at-a-time form.
 - `UPDATE computers SET price = 299 WHERE key = 'c64'` → read, modify, append a new version.
 - On an append-only store, every update is a new record and the old one is garbage until `merge`.
 - Updating the **key** is a delete plus an insert, and the book says so: the key is the identity.
-- **The race:** two concurrent read-modify-writes lose one update. The fix (a lock, or a
-  compare-and-put) is the smallest transaction-shaped thing the book needs; real transactions are
-  out of this plan's scope.
+- **The race:** two concurrent read-modify-writes lose one update. The fix is a compare-and-put:
+  read with `get_versioned`, write a batch with `Cond::Version(v)` on the key, retry if the check
+  fails (yabiir 0.9). It's the smallest transaction-shaped thing the book needs; multi-statement
+  transactions are out of this plan's scope.
 
 ### D4. Set-at-a-time `INSERT … SELECT`
 
@@ -202,7 +208,7 @@ an extension, with grouping defined over sets so it doesn't smuggle bags back in
 | 4 | attributes in values | value codec (layer above the engine) |
 | 5 | `UNION` / `INTERSECT` / `EXCEPT` | tables (key prefix); merge of two scans |
 | 6–8 | ×, ⋈, ÷ | nothing new |
-| 10 | faster σ on attributes | index tables |
-| D1 | `INSERT` | `put`, insert-if-absent |
+| 10 | faster σ on attributes | index tables, maintained in one `write_batch` with the record (0.9) |
+| D1 | `INSERT` | `put`; insert-if-absent as `write_batch` with `Cond::Absent` (0.9) |
 | D2 | `DELETE` | `delete` |
-| D3 | `UPDATE` | read-modify-write under a lock |
+| D3 | `UPDATE` | read-modify-write: `get_versioned`, then `write_batch` with `Cond::Version` (0.9) |

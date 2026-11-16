@@ -4,7 +4,9 @@
 
 #status[Incipient. The operations and composite keys are described; the order-preserving encoding
 needs a worked section. Since yabiir 0.6.0 the keydir can be sorted (`KeyOrder::Sorted`, a `BTreeMap`),
-and `Engine::scan` answers a range of keys; composite keys and their encoding are not implemented.]
+and `Engine::scan` answers a range of keys; since 0.9, `Engine::scan_page` reads it a page at a time in
+either direction, so the newest twenty are one call. Composite keys and their encoding are not
+implemented.]
 
 An email program opening an INBOX of 16,720 messages needs the newest twenty. With
 a hash keydir that means reading every key in the store — every mailbox of every account — keeping

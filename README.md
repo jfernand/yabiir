@@ -12,12 +12,19 @@ Sheehy & Smith's 2010 paper (included locally at [`refs/bitcask-intro.pdf`](refs
 ## What it does
 
 - `put`/`get`/`delete` with append-only writes, O(1) reads (one keydir lookup + one positioned read)
+- Atomic write batches with conditions: `Engine::write_batch(vec![Op::Check { .. }, Op::Put { .. }, ..])` writes every
+  put and delete or none, after checking `Cond::Absent` / `Exists` / `Version(v)` against the store as it was just
+  before the batch. A batch is one record on disk, so a crash leaves all of it or none. The returned `Commit` is a
+  runtime-agnostic `Future` with a blocking `wait()`
+- Versions: every write gets a sequence number, which becomes the version of each key it puts
+  (`Engine::get_versioned`). A version is never reused, even after a delete, so `Cond::Version` is an exact
+  compare-and-swap
 - Crash recovery on `open` — full-scan or hint-file-based, whichever's available
 - `merge` (compaction): reclaims space from superseded values and deleted keys, safe to run concurrently with live
   traffic
 - A choice of keydir per open, `Options::key_order`: `KeyOrder::Hashed` (the default, fastest point lookups) or
-  `KeyOrder::Sorted`, which adds `Engine::scan(start, end)` for ranges of keys in order and makes `fold`/`list_keys`
-  return keys in order. Nothing about it is stored on disk, so a store opens either way. `benches/keydir_order.rs`
+  `KeyOrder::Sorted`, which adds `Engine::scan(start, end)` for ranges of keys in order, `Engine::scan_page` for a
+  page of one either way (with a limit and versions), and makes `fold`/`list_keys` return keys in order. Nothing about it is stored on disk, so a store opens either way. `benches/keydir_order.rs`
   measures what the order costs
 - A process-level single-writer lock, so two writable (`is_read_write: true`) handles can't corrupt the same directory
 - A small SQL front end over a store, in its own crate (`yabiir-sql`): `SELECT [DISTINCT] * | key | value [WHERE key =
@@ -70,10 +77,10 @@ cargo run --bin kv -- /tmp/my-data merge
 | [`crates/yabiir-testutil`](crates/yabiir-testutil) | A self-removing temporary directory, shared by tests and benches. |
 | [`xtask`](xtask) | Dev tooling: `cargo xtask release`, `cargo xtask bench`. |
 
-Inside the engine, bottom up: `format` (the bytes of an entry and of a hint record), `datafile` (the files: appending,
-positioned reads, scanning), `keydir` (the in-memory index), `writer` (the single writer: append, publish, rotate),
-`commit` (group commit), `recovery` (rebuilding the keydir at open), `merge` (compaction), and `engine`, which puts them
-behind the `Bitcask` trait.
+Inside the engine, bottom up: `format` (the bytes of a record and of a hint record, in both on-disk formats),
+`datafile` (the files: appending, positioned reads, scanning), `keydir` (the in-memory index), `batch` (write batches,
+conditions and `Commit`), `writer` (the single writer thread: check, append, sync, publish, rotate), `recovery`
+(rebuilding the keydir at open), `merge` (compaction), and `engine`, which puts them behind the `Bitcask` trait.
 
 ## Performance
 
@@ -81,10 +88,13 @@ The design goal is **predictable latency**, not just peak throughput — a stora
 occasionally stalls for tens of milliseconds is worse for most real workloads than one that's a bit slower but
 consistent. A few design choices follow directly from that:
 
-- `get`/`fold` never take the writer's lock — every write is handed to the OS before its location is published, so
-  an independent read handle always sees the bytes the keydir points at.
-- There is one writer, strictly: an append and the keydir update that publishes it are one step under one lock, so the
-  keydir changes in the order of the log. Readers aren't behind that lock.
+- Reads never wait for the writer — every write is handed to the OS before its location is published, so an
+  independent read handle always sees the bytes the keydir points at. Reads run on the caller's thread.
+- There is one writer thread, and it alone appends: it takes every queued batch as a group, checks, appends, syncs and
+  publishes them in log order, so the keydir changes in the order of the log. It spins briefly before sleeping, so a
+  lone writer pays little for the hand-off (a `put` without fsync: 2.9 µs at the median against 1.8 µs in 0.8, in
+  `loadtest` on one thread), and many writers gain (4 threads: more throughput than 0.8, and p99.9 65 µs instead of
+  2.8 ms).
 - The keydir's `HashMap` uses `ahash` rather than the default SipHash or `rustc-hash`/FxHash: `ahash` is fast without
   FxHash's weakness on sequential/structured keys (`key-0000000042`-style — auto-incrementing IDs, timestamps,
   zero-padded counters), which can collapse almost every key into one hash bucket and turn O(1) map operations into
@@ -92,9 +102,8 @@ consistent. A few design choices follow directly from that:
 - `merge`'s compaction pass batches its flushes (every 256 entries, or when an output file fills up) instead of
   flushing after every entry, with keydir repoints deferred to line up with each batch — so a long merge running
   concurrently with live traffic doesn't stall foreground `put`/`get`/`delete` calls behind its own I/O.
-- With `should_sync_on_put: true`, concurrent writers share a single `fsync` (group commit,
-  `crates/yabiir/src/commit.rs`) instead of each paying for their own — one caller becomes the leader and fsyncs
-  without holding the write lock, everyone else just waits for that shared fsync to cover their write.
+- With `should_sync_on_put: true`, concurrent writers share a single `fsync`: the writer thread syncs everything that
+  queued while it was busy at once (`crates/yabiir/src/writer.rs`).
 
 Full design writeups — including the profiling methodology and measured before/after numbers — live in
 [`docs/merge-batched-flushing.pdf`](docs/merge-batched-flushing.pdf)
@@ -146,7 +155,12 @@ opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
 ## Durability and failures
 
 - **Without `should_sync_on_put`** (the default), a write is handed to the OS before `put` returns: it survives a crash
-  of the process, but a power failure can lose the last writes. With it, `put` returns once the entry is fsynced.
+  of the process, but a power failure can lose the last writes. With it, `put` returns once the record is fsynced, and
+  no reader sees a write before it is durable.
+- **A batch is all or nothing.** Its puts and deletes are one record under one CRC; recovery applies a record whole or
+  skips it, whether a crash cut it short or bit rot damaged it.
+- **Stores written by 0.8 and earlier open as they are.** Their entries read as version 1, and the next merge rewrites
+  them in the current format.
 - **A closed file is durable.** A data file is fsynced when it fills up and is closed, and the directory is fsynced
   when a file is created or removed, so a file's name is as durable as its contents.
 - **A failed write or fsync is not retried.** The kernel reports a failed write-back once; a second fsync can succeed
@@ -158,9 +172,8 @@ opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
 
 ## Known limitations
 
-- **With `should_sync_on_put`, a write is visible slightly before it is durable.** The keydir is updated when the entry
-  is handed to the OS; the shared fsync comes after. Another thread can read a value that a power failure in that
-  window would lose. The writer itself isn't told `Ok` until the fsync is done.
+- **A batch that fails to write may still be on disk.** If the `write` or fsync of a group fails, its batches get an
+  error and are not published, but their records may survive a crash and reappear at the next open.
 - **A read-only handle is a snapshot.** It sees the store as it was at open, and it holds no lock, so a merge in the
   writing process can remove files it still needs. Reopen it after a merge.
 - **Reads don't verify CRCs.** An entry's CRC is checked when a file is scanned (recovery, merge), not on `get`.

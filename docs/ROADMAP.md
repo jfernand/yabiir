@@ -84,7 +84,7 @@ rebuild-into-a-fresh-map pass, rather than leaving it to whatever the system all
 Where to start:
 
 - For backpressure, the cheap version: cap `put`/`delete` (block, or return an error) once the count of un-merged
-  files crosses a configurable threshold — a small, local change to `Writer::append`.
+  files crosses a configurable threshold — a small, local change to the writer thread (`src/writer.rs`).
 - The more thorough version: have `Engine` schedule its own background merge automatically past a low-water mark,
   instead of leaving callers (like `loadtest`'s `--merge-interval-secs`) to manage timing themselves — a bigger
   change than the cap above.
@@ -112,13 +112,14 @@ corrupted or vanished backing file, instead of a `Result`) and the larger-than-m
 `docs/reading-databases.pdf` §24, so either one should sit behind a feature flag next to the plain path, not replace
 it.
 
-The single writer is strict, and has a home: `src/writer.rs`. A put or delete appends and updates the keydir in one
-critical section under the writer's lock (`Writer::append` takes the publish as a closure), so the keydir changes in
-log order, as the paper's keydir is "atomically updated with the location of the newest data". Rotation and the start
-of a merge happen under the same lock. The `race_*_publish_in_log_order` tests pin the order down. One consequence:
-with `sync_on_put`, the fsync still runs after the lock is released (group commit), so a write becomes visible to
-readers just before it is durable and before its `put` returns. Making visibility wait for durability would need
-writes to publish in order *after* their shared fsync, a queue this design doesn't have.
+The single writer is a thread, `src/writer.rs`, and every write is a batch sent to it. It takes whatever batches are
+queued as one group: checks their conditions, appends each as one record, hands the group to the OS in one `write`
+(and one fsync, with `sync_on_put`), then publishes the group to the keydir in log order under one lock, as the
+paper's keydir is "atomically updated with the location of the newest data". Rotation and the start of a merge are
+commands to the same thread. The `race_*_publish_in_log_order` tests pin the order down. Because publishing comes
+after the fsync, a write is visible to readers only once it is durable; the earlier design, with the publish under a
+lock and the shared fsync after it, let a reader see a write a power failure could still lose. Both sides spin for up
+to 50 µs before sleeping, which keeps the hand-off to the thread cheap for a lone writer.
 
 Tail latency is the thread connecting all of this, and it isn't finished: the merge-batched-flushing report already
 notes that pass duration climbs over a sustained run, because more data accumulates between merges than the
@@ -128,10 +129,12 @@ above, looked at from the latency side rather than the correctness side.
 
 Where to start:
 
-- The strict critical section costs nothing measurable: a 4-thread `loadtest` run (80 % reads, merge every 3 s) is
-  slightly faster after the change than before it. Measure again at high writer counts with `sync_on_put`, where the
-  lock is most contended. A rotation still fsyncs the file it closes while holding the lock; moving that fsync out
-  from under it is the obvious next cut in write tail latency.
+- The writer thread, measured with `loadtest` against 0.8's mutex writer: one thread's `put` without fsync costs
+  2.9 µs at the median instead of 1.8 µs; four writer threads get more throughput (425k against 365k puts/s) and a
+  p99.9 of 65 µs instead of 2.8 ms; with `sync_on_put` and eight threads the median halves. A rotation still fsyncs
+  the file it closes on the writer thread, holding up the next group; moving that fsync off it is the obvious next
+  cut in write tail latency. This thread is also where `io_uring` would go: one ring, owned by the writer, with the
+  group's appends and its fsync linked in one submission.
 - Merge reads its input about three times faster than it did (a 256 KiB read buffer instead of two `read` calls per
   entry). It still copies every live entry on every pass, and still takes the keydir's lock once per entry to check
   liveness and once per entry to repoint; batching those is the next thing to profile.
@@ -221,10 +224,11 @@ Two things here change the engine, and both should be settled before the layers 
 
 First, atomicity across keys. A record and its index entries are several keys, so an insert is several `put`s, and a
 crash between them leaves an index entry with no record or a record missing from its index. DynamoDB answers this by
-maintaining GSIs asynchronously and calling them eventually consistent. yabiir's single strict writer allows a
-stronger answer: a write batch, appended as one unit (one CRC over the whole batch, or a commit marker after it),
-published to the keydir in one critical section and replayed by recovery all or nothing. That is a change to the
-entry format and to recovery, and it is the same thing `UPDATE`'s read-modify-write needs.
+maintaining GSIs asynchronously and calling them eventually consistent. yabiir's single writer allows a stronger
+answer, and since 0.9 it has one: `Engine::write_batch`, appended as one record under one CRC, published to the keydir
+in one critical section and replayed by recovery all or nothing, with `Op::Check` conditions (absent, exists, an
+exact version) checked first. That is also what `UPDATE`'s read-modify-write needs: read with `get_versioned`, write
+with a `Cond::Version` check.
 
 Second, where the B-tree sits. Built on the engine's API, with each node stored as a value, it inherits the log's
 crash safety and merge for free, and the keydir holds one small entry per node instead of every key, so memory no
@@ -239,8 +243,8 @@ Where to start:
 - Records first, since everything else needs them: a codec crate with a schema type and an encoding that sorts the
   way the attribute's domain does (order-preserving), so that a key built from attributes scans in attribute order.
   Getting that encoding right is what makes tables' primary keys and index keys work with `scan` at all.
-- Then the write batch in the engine: `Engine::write_batch(&[Op])`, with model-test coverage of a crash in the middle
-  of one before anything uses it.
+- The write batch in the engine is done (0.9): `Engine::write_batch`, with versions, conditions and a paged
+  `scan_page`, covered by the model test and by a crash cut at every byte of a batch.
 - Tables and indexes after that, as a thin layer: a catalog (itself stored in the store, under a reserved prefix)
   naming each table's id, schema and indexes, and an index maintained in the same batch as every write to its table.
   Index backfill, for an index added to a table that already has rows, is a `scan` of the table writing batches.

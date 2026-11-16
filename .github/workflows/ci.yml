@@ -69,3 +69,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: PROPTEST_CASES=2000 cargo test --test model
+
+  kotlin:
+    name: kotlin (unit + differential vs Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+      # Builds yabiir-diffd (release) itself, then runs the Kotlin unit
+      # tests, the corpus replay and the default number of random runs.
+      - run: ./gradlew -p kotlin check

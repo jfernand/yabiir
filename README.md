@@ -96,10 +96,13 @@ cargo run --bin kv -- /tmp/my-data merge
 | [`crates/yabiir-loadtest`](crates/yabiir-loadtest) | `loadtest`, the load generator. |
 | [`crates/yabiir-examples`](crates/yabiir-examples) | Example programs with heavy dependencies. |
 | [`crates/yabiir-testutil`](crates/yabiir-testutil) | A self-removing temporary directory, shared by tests and benches. |
+| [`crates/yabiir-difftest`](crates/yabiir-difftest) | `yabiir-diffd`, which drives a store over stdin/stdout for differential tests. |
 | [`xtask`](xtask) | Dev tooling: `cargo xtask release`, `bench`, `bench-table`, `campaign`. |
 
 Beside the crates: [`book/`](book) is *Append Only*, a book in progress that builds a relational database on yabiir
 one operator at a time (Typst; `book/tools/build.sh`), with its programs in `book/code/`.
+[`kotlin/`](kotlin) is a port of the engine to Kotlin/JVM 21 that writes the same files, byte for byte, checked
+against this one by differential tests (see [`kotlin/README.md`](kotlin/README.md)).
 [`bench-history/`](bench-history) holds the recorded Criterion medians of every release, and `report.pdf`, their
 charts with commentary. [`docs/ROADMAP.md`](docs/ROADMAP.md) is what comes next.
 
@@ -222,6 +225,7 @@ opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
 cargo test                                   # unit tests + tests/model.rs's proptest model test
 PROPTEST_CASES=2000 cargo test --test model  # more property-based cases, for extra confidence
 cargo bench                                  # Criterion suites — format, keydir, keydir_order, datafile, merge
+./gradlew -p kotlin check                    # the Kotlin port, and its differential tests against this engine
 ```
 
 The proptest model test runs random sequences of `put`/`delete`/`get`/`reopen`/`merge` and write batches with

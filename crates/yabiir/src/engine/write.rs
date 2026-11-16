@@ -35,6 +35,15 @@ impl Engine {
         self.submit(ops, crate::now_unix(), None)
     }
 
+    /// [`Engine::write_batch`] with the record's timestamp given, as `put`
+    /// and `delete` take one. Not part of the supported API: it exists so
+    /// that a differential test can write the same bytes as another
+    /// implementation.
+    #[doc(hidden)]
+    pub fn write_batch_at(&self, ops: Vec<Op>, timestamp: u32) -> Commit {
+        self.submit(ops, timestamp, None)
+    }
+
     /// [`Bitcask::put`](crate::Bitcask::put), with
     /// `between_append_and_publish` run on the writer thread after the
     /// record is written and before the keydir points at it. Production

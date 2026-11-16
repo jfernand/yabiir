@@ -1,0 +1,9 @@
+{"cmd":"open","dir":"{DIR}","max_file_size":1,"sync_on_put":false,"sorted":true,"read_only":false}
+{"cmd":"put","k":"61","v":"","ts":1001}
+{"cmd":"get_versioned","k":"61"}
+{"cmd":"delete","k":"61","ts":1002}
+{"cmd":"merge"}
+{"cmd":"close"}
+{"cmd":"open","dir":"{DIR}","max_file_size":1,"sync_on_put":false,"sorted":true,"read_only":false}
+{"cmd":"put","k":"61","v":"","ts":1005}
+{"cmd":"get_versioned","k":"61"}

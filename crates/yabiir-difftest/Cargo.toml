@@ -1,0 +1,20 @@
+[package]
+name = "yabiir-difftest"
+version = "0.1.0"
+edition.workspace = true
+description = "yabiir-diffd: drives a yabiir store over stdin/stdout, for differential tests against other implementations"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "yabiir-diffd"
+path = "src/main.rs"
+
+[dependencies]
+yabiir.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+yabiir-testutil.workspace = true

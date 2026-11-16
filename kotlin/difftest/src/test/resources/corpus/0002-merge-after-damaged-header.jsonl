@@ -1,0 +1,8 @@
+{"cmd":"open","dir":"{DIR}","max_file_size":1,"sync_on_put":false,"sorted":true,"read_only":false}
+{"cmd":"put","k":"61","v":"","ts":1001}
+{"cmd":"get_versioned","k":"61"}
+{"cmd":"merge"}
+{"cmd":"flip","file":0,"at":0}
+{"cmd":"fold"}
+{"cmd":"merge"}
+{"cmd":"get_versioned","k":"61"}

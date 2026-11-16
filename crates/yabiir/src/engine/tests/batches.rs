@@ -351,3 +351,31 @@ fn a_batch_survives_merge_and_reopen() {
     assert_eq!(value(&db, b"b"), Some(b"22".to_vec()));
     assert_eq!(version(&db, b"c"), Some(v));
 }
+
+/// Merge copies a batch's live operations one record each, so its output
+/// can be larger than its input: a batch of many tiny puts becomes many
+/// records with a header each. The ids merge reserves for its output must
+/// cover that.
+#[test]
+fn merge_of_a_batch_of_tiny_puts_has_enough_output_ids() {
+    let dir = TempDir::new();
+    let db = Engine::open(
+        &*dir,
+        Options {
+            max_file_size: 200,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let ops = (0..40u8)
+        .map(|i| put(&[b'k', i], b""))
+        .collect();
+    db.write_batch(ops)
+        .wait()
+        .unwrap();
+    db.merge()
+        .unwrap();
+    for i in 0..40u8 {
+        assert_eq!(value(&db, &[b'k', i]), Some(Vec::new()));
+    }
+}

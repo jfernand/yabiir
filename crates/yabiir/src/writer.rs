@@ -498,9 +498,8 @@ impl Worker {
 
     /// See [`Writer::seal_for_merge`].
     ///
-    /// The number of output files isn't known yet, but it has a bound: the
-    /// output holds at most the input's bytes, and every output file but the
-    /// last is filled to `max_file_size`.
+    /// The number of output files isn't known yet, but it has a bound: see
+    /// [`max_output_files`].
     fn seal_for_merge(&mut self) -> io::Result<Option<MergeScope>> {
         self.retire_active()?;
         let input_ids = DataFileSet::discover(
@@ -517,11 +516,7 @@ impl Worker {
                 .files
                 .len_of(id)?;
         }
-        let max_output_files = input_bytes
-            / self
-                .max_file_size
-                .max(1)
-            + 1;
+        let max_output_files = max_output_files(input_bytes, self.max_file_size);
         // `next_file_id` is above every input already. The `max` keeps the
         // merge safe even if it weren't: an output file that shared an id
         // with an input would be removed with it.
@@ -638,6 +633,35 @@ fn fail_all(written: &mut Vec<Written>, reason: &str) {
             .done
             .complete(Err(Error::Io(io::Error::other(reason.to_owned()))));
     }
+}
+
+/// How many files a merge of `input_bytes` of data files can write, at most,
+/// when it closes each file once it reaches `max_file_size`.
+///
+/// The output can be larger than the input: merge writes each live
+/// operation as a record of its own, so a batch of many operations gains a
+/// record header per operation, and every output file starts with a file
+/// header. Two bounds hold all the same:
+///
+/// - Every output file holds at least one record, of one operation, and an
+///   operation takes at least `OP_HEADER_SIZE + 1` bytes of the input (a
+///   key is never empty; a version 1 entry takes more). So there are no more
+///   files than that many operations.
+/// - Every output file but the last is at least `max_file_size` long, and
+///   all of them together hold the input's operations plus a record header
+///   each and a file header each.
+fn max_output_files(input_bytes: u64, max_file_size: u64) -> u64 {
+    let min_op_len = format::OP_HEADER_SIZE as u64 + 1;
+    let max_ops = input_bytes / min_op_len + 1;
+    let header = format::FILE_HEADER_SIZE as u64;
+    let by_size = if max_file_size > header {
+        let record_bytes = input_bytes + max_ops * format::RECORD_HEADER_SIZE as u64;
+        // (files - 1) * max_file_size <= record_bytes + files * header
+        (record_bytes + max_file_size).div_ceil(max_file_size - header)
+    } else {
+        u64::MAX
+    };
+    max_ops.min(by_size) + 1
 }
 
 fn out_of_file_ids() -> io::Error {

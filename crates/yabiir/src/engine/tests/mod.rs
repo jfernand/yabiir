@@ -1,6 +1,7 @@
 //! The engine's tests, by subject.
 
 mod basics;
+mod batches;
 mod handles;
 mod metrics;
 mod races;

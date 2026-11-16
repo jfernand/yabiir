@@ -52,6 +52,12 @@ impl SharedKeydir {
         f(&read(&self.0))
     }
 
+    /// Run `f` with the keydir under its write lock: for the writer, which
+    /// publishes a whole group of writes in one critical section.
+    pub fn with_write<R>(&self, f: impl FnOnce(&mut Keydir) -> R) -> R {
+        f(&mut write(&self.0))
+    }
+
     /// A copy of every `(key, entry)` pair as of one instant.
     pub fn snapshot(&self) -> Vec<(Box<[u8]>, KeydirEntry)> {
         read(&self.0)

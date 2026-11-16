@@ -37,10 +37,12 @@ pub struct Options {
     /// one read-write handle can be open on a directory at a time; a lock
     /// file in the directory enforces it.
     pub is_read_write: bool,
-    /// Whether `put` and `delete` wait until the entry is fsynced before
-    /// they return. Safer and slower. Concurrent writers share fsyncs
-    /// (group commit). Without it, a write survives a crash of the process
-    /// but not necessarily one of the machine.
+    /// Whether a write (`put`, `delete`, a write batch) waits until its
+    /// record is fsynced before it returns, and before readers see it.
+    /// Safer and slower. Concurrent writers share fsyncs: the writer thread
+    /// syncs every write queued behind the one it is syncing at once.
+    /// Without it, a write survives a crash of the process but not
+    /// necessarily one of the machine.
     pub should_sync_on_put: bool,
     /// The size, in bytes, at which the active file is closed and a new one
     /// started. A file can exceed it by one entry.

@@ -108,15 +108,6 @@ impl ActiveFile {
             .sync_data()
     }
 
-    /// Flush, then return another handle onto the same file. Syncing the
-    /// returned handle makes durable everything appended before this call,
-    /// and can be done without holding whatever lock guards this
-    /// `ActiveFile`; group commit (`crate::commit`) does that.
-    pub(crate) fn sync_handle(&mut self) -> io::Result<File> {
-        self.flush()?;
-        self.reader()
-    }
-
     /// Read `len` bytes at `pos`. Only flushed bytes are there to read.
     pub fn read_at(&self, pos: u64, len: u32) -> io::Result<Vec<u8>> {
         pread_exact(

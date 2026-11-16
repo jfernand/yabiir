@@ -24,14 +24,16 @@
 //! - `format`: the bytes of a data-file entry and of a hint-file record.
 //! - `datafile`: the files; appending to the active one, reading any of them.
 //! - `keydir`: the in-memory index.
-//! - `writer`: the single writer, which appends and rotates.
-//! - `commit`: group commit, for `sync_on_put`.
+//! - `batch`: write batches, their operations and conditions, and the
+//!   [`Commit`] a caller waits on.
+//! - `writer`: the single writer thread, which appends, publishes and
+//!   rotates.
 //! - `recovery`: rebuilding the keydir at open.
 //! - `merge`: compaction.
 //! - `engine`: [`Engine`], which puts them behind the [`Bitcask`] API.
 
 mod api;
-mod commit;
+mod batch;
 mod engine;
 mod error;
 mod lock;
@@ -54,6 +56,7 @@ pub mod format;
 pub mod keydir;
 
 pub use api::{Bitcask, KeyOrder, Options, Versioned};
+pub use batch::{Commit, Cond, Op, Outcome};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use metrics::Metrics;

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use proptest::prelude::*;
-use yabiir::{Bitcask, Engine, KeyOrder, Options, now_unix};
+use yabiir::{Bitcask, Cond, Engine, Error, KeyOrder, Options, now_unix};
 use yabiir_testutil::TempDir;
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,30 @@ enum Op {
     Get(Vec<u8>),
     Reopen,
     Merge,
+    Batch(Vec<BatchOp>),
+}
+
+/// One operation of a write batch, before versions are known: a version
+/// check is against the key's current version, or a stale one.
+#[derive(Debug, Clone)]
+enum BatchOp {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+    CheckAbsent(Vec<u8>),
+    CheckExists(Vec<u8>),
+    CheckCurrentVersion(Vec<u8>),
+    CheckStaleVersion(Vec<u8>),
+}
+
+fn batch_op_strategy() -> impl Strategy<Value = BatchOp> {
+    prop_oneof![
+        4 => (key_strategy(), value_strategy()).prop_map(|(k, v)| BatchOp::Put(k, v)),
+        2 => key_strategy().prop_map(BatchOp::Delete),
+        1 => key_strategy().prop_map(BatchOp::CheckAbsent),
+        1 => key_strategy().prop_map(BatchOp::CheckExists),
+        2 => key_strategy().prop_map(BatchOp::CheckCurrentVersion),
+        1 => key_strategy().prop_map(BatchOp::CheckStaleVersion),
+    ]
 }
 
 /// A small, overlapping key alphabet (single bytes 'a'..='f') — deliberately
@@ -45,6 +69,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         2 => key_strategy().prop_map(Op::Delete),
         1 => Just(Op::Reopen),
         1 => Just(Op::Merge),
+        3 => prop::collection::vec(batch_op_strategy(), 0..5).prop_map(Op::Batch),
     ]
 }
 
@@ -71,6 +96,8 @@ enum Orders {
 fn run_model(ops: Vec<Op>, orders: Orders) {
     let dir = TempDir::new();
     let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+    // Each live key's version, as the store reported it.
+    let mut versions: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
     let mut order = match orders {
         Orders::Always(o) => o,
         Orders::Alternating => KeyOrder::Hashed,
@@ -82,20 +109,42 @@ fn run_model(ops: Vec<Op>, orders: Orders) {
             Op::Put(k, v) => {
                 db.put(&k, &v, now_unix())
                     .unwrap();
+                let version = db
+                    .get_versioned(&k)
+                    .unwrap()
+                    .unwrap()
+                    .version;
+                assert!(
+                    versions
+                        .get(&k)
+                        .is_none_or(|&old| version > old)
+                );
+                versions.insert(k.clone(), version);
                 model.insert(k, v);
             }
             Op::Delete(k) => {
                 db.delete(&k, now_unix())
                     .unwrap();
+                versions.remove(&k);
                 model.remove(&k);
             }
+            Op::Batch(batch) => {
+                run_batch(&db, batch, &mut model, &mut versions);
+            }
             Op::Get(k) => {
+                let got = db
+                    .get_versioned(&k)
+                    .unwrap();
                 assert_eq!(
-                    db.get(&k)
-                        .unwrap(),
-                    model
+                    got.as_ref()
+                        .map(|g| &g.value),
+                    model.get(&k)
+                );
+                assert_eq!(
+                    got.map(|g| g.version),
+                    versions
                         .get(&k)
-                        .cloned()
+                        .copied()
                 );
             }
             Op::Reopen => {
@@ -147,6 +196,104 @@ fn run_model(ops: Vec<Op>, orders: Orders) {
             model.get(k)
         );
     }
+}
+
+/// Run one batch against the store and the model: the checks against the
+/// state before the batch, then the writes in order, all or nothing.
+fn run_batch(
+    db: &Engine,
+    batch: Vec<BatchOp>,
+    model: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+    versions: &mut BTreeMap<Vec<u8>, u64>,
+) {
+    let mut ops = Vec::new();
+    let mut first_failure = None;
+    for (index, op) in batch
+        .into_iter()
+        .enumerate()
+    {
+        let current = |k: &Vec<u8>| {
+            versions
+                .get(k)
+                .copied()
+        };
+        let (op, holds) = match op {
+            BatchOp::Put(key, value) => (yabiir::Op::Put { key, value }, true),
+            BatchOp::Delete(key) => (yabiir::Op::Delete { key }, true),
+            BatchOp::CheckAbsent(key) => {
+                let holds = current(&key).is_none();
+                (
+                    yabiir::Op::Check {
+                        key,
+                        cond: Cond::Absent,
+                    },
+                    holds,
+                )
+            }
+            BatchOp::CheckExists(key) => {
+                let holds = current(&key).is_some();
+                (
+                    yabiir::Op::Check {
+                        key,
+                        cond: Cond::Exists,
+                    },
+                    holds,
+                )
+            }
+            BatchOp::CheckCurrentVersion(key) => {
+                // Absent keys have no version: check one that can't match.
+                let (cond, holds) = match current(&key) {
+                    Some(v) => (Cond::Version(v), true),
+                    None => (Cond::Version(1), false),
+                };
+                (yabiir::Op::Check { key, cond }, holds)
+            }
+            BatchOp::CheckStaleVersion(key) => {
+                let stale = current(&key).map_or(1, |v| v - 1);
+                (
+                    yabiir::Op::Check {
+                        key,
+                        cond: Cond::Version(stale),
+                    },
+                    false,
+                )
+            }
+        };
+        if !holds && first_failure.is_none() {
+            first_failure = Some(index);
+        }
+        ops.push(op);
+    }
+
+    let outcome = db
+        .write_batch(ops.clone())
+        .wait();
+    if let Some(index) = first_failure {
+        assert!(
+            matches!(outcome, Err(Error::ConditionFailed { index: i }) if i == index),
+            "expected check {index} to fail, got {outcome:?}"
+        );
+        return;
+    }
+    let written = outcome.unwrap();
+    let mut wrote = false;
+    for op in ops {
+        match op {
+            yabiir::Op::Put { key, value } => {
+                wrote = true;
+                versions.insert(key.clone(), written.expect("a put writes"));
+                model.insert(key, value);
+            }
+            yabiir::Op::Delete { key } => {
+                wrote |= model
+                    .remove(&key)
+                    .is_some();
+                versions.remove(&key);
+            }
+            yabiir::Op::Check { .. } => {}
+        }
+    }
+    assert_eq!(written.is_some(), wrote, "{written:?}");
 }
 
 proptest! {

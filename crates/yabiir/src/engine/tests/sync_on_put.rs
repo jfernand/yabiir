@@ -31,7 +31,7 @@ fn sync_on_put_round_trips_correctly() {
     );
 }
 
-/// The point of group commit: several `sync_on_put` writers that arrive
+/// The point of writing in groups: several `sync_on_put` writers that arrive
 /// concurrently should share a small number of real fsyncs, not pay one
 /// each. Deterministic (not timing-based): a first "opener" write is
 /// done and fully returns before starting the batch, so the batch's

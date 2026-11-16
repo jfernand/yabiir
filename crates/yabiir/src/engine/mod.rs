@@ -2,10 +2,10 @@
 //! [`Bitcask`] API. See `docs/bitcask-implementation-plan.md` §4.
 //!
 //! - `mod.rs`: [`Engine`], opening one, and the [`Bitcask`] impl.
-//! - `write.rs`: `put` and `delete`.
+//! - `write.rs`: `write_batch`, and `put` and `delete` as batches of one.
 //! - `read.rs`: `get`, `fold`, `list_keys` and [`Engine::scan`].
 //!
-//! Appending is the [`Writer`]'s job, compaction `crate::merge`'s, and
+//! Appending is the [`Writer`] thread's job, compaction `crate::merge`'s, and
 //! rebuilding the keydir at open `crate::recovery`'s.
 
 mod read;
@@ -30,7 +30,8 @@ use crate::writer::Writer;
 
 /// A Bitcask store open in this process.
 pub struct Engine {
-    keydir: SharedKeydir,
+    /// Shared with the writer thread, which publishes every write to it.
+    keydir: Arc<SharedKeydir>,
     files: Arc<DataFileSet>,
     /// `None` for a read-only handle, which never appends.
     writer: Option<Writer>,
@@ -59,7 +60,8 @@ impl Engine {
             .with_read(Keydir::order)
     }
 
-    /// How many fsyncs group commit has run, to check that writers share them.
+    /// How many fsyncs the writer has run for writes, to check that writers
+    /// share them.
     #[cfg(test)]
     fn fsync_call_count(&self) -> usize {
         self.writer
@@ -114,6 +116,7 @@ impl Bitcask for Engine {
         // No existing file is appended to again, not even the one that was
         // active when the store was last closed or crashed: the writer
         // starts a new file, above every id on disk, at its first append.
+        let keydir = Arc::new(SharedKeydir::new(keydir));
         let writer = if opts.is_read_write {
             let next_file_id = match file_ids.last() {
                 Some(&id) => id
@@ -123,19 +126,20 @@ impl Bitcask for Engine {
                     })?,
                 None => 0,
             };
-            Some(Writer::new(
+            Some(Writer::start(
                 Arc::clone(&files),
+                Arc::clone(&keydir),
                 next_file_id,
                 next_seq,
                 opts.max_file_size,
                 opts.should_sync_on_put,
-            ))
+            )?)
         } else {
             None
         };
 
         Ok(Self {
-            keydir: SharedKeydir::new(keydir),
+            keydir,
             files,
             writer,
             merge_lock: Mutex::new(()),
@@ -151,11 +155,11 @@ impl Bitcask for Engine {
     }
 
     fn put(&self, key: &[u8], value: &[u8], timestamp: u32) -> Result<()> {
-        self.put_with_hook(key, value, timestamp, || {})
+        self.put_with_hook(key, value, timestamp, None)
     }
 
     fn delete(&self, key: &[u8], timestamp: u32) -> Result<()> {
-        self.delete_with_hook(key, timestamp, || {})
+        self.delete_with_hook(key, timestamp, None)
     }
 
     fn list_keys(&self) -> Result<Vec<Vec<u8>>> {

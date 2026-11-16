@@ -4,7 +4,7 @@
 //!
 //! ## The steps
 //!
-//! 1. **Seal.** Under the writer's lock, close the active file and reserve
+//! 1. **Seal.** On the writer thread, between two writes, close the active file and reserve
 //!    the ids the output files will use ([`Writer::seal_for_merge`]). Every
 //!    data file there is at that instant is input; writes from then on go to
 //!    files with higher ids than the output's.
@@ -17,7 +17,7 @@
 //! 4. **Finish.** Fsync the output and the directory.
 //! 5. **Remove** the input files, oldest first.
 //!
-//! Reads and writes go on throughout; only step 1 holds the writer's lock.
+//! Reads and writes go on throughout; only step 1 waits for the writer.
 //!
 //! ## Why the order of ids matters
 //!

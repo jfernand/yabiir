@@ -1,5 +1,7 @@
 use super::*;
 use crate::datafile::DataFileSet;
+use crate::engine::write::Hook;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
 /// A store whose every `put` rotates into its own file, holding `K` and
@@ -77,40 +79,41 @@ fn race_fold_survives_merge_removing_files_after_its_snapshot() {
 }
 
 /// Runs `merge` on another thread from inside a write's
-/// append-to-publish window, and gives it up to a second to finish
-/// *inside* that window. Unfixed, merge completes there. Fixed, merge
-/// must wait for the write to publish, so the wait times out and merge
-/// finishes after the write returns. The verdict doesn't depend on
-/// timing: a merge that can't finish inside the window can't cause the
+/// append-to-publish window, which is on the writer thread, and gives it up
+/// to a second to finish *inside* that window. A merge starts by sealing
+/// the active file, which is a command to the writer thread; the writer is
+/// busy running this window, so the wait times out and the merge happens
+/// after the publish. If the publish ever moved out of the writer's hands,
+/// the merge would complete inside the window. The verdict doesn't depend
+/// on timing: a merge that can't finish inside the window can't cause the
 /// race either.
-fn merge_inside_window<'scope, 'env>(
-    scope: &'scope std::thread::Scope<'scope, 'env>,
-    db: &'env Engine,
-) {
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    scope.spawn(move || {
-        db.merge()
-            .unwrap();
-        let _ = done_tx.send(());
-    });
-    let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+fn merge_inside_window(db: &Arc<Engine>) -> Hook {
+    let db = Arc::clone(db);
+    Box::new(move || {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            db.merge()
+                .unwrap();
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+    })
 }
 
 /// `put` appends `N`, and before it publishes `N`, a merge tries to run.
 /// If it could, it would see `N`'s entry as dead (the keydir doesn't point
 /// at it yet), drop it and remove its file; `put` would then publish a
 /// location in a file that no longer exists, and the write would be lost.
-/// The publish happens under the writer's lock, which a merge needs to
-/// start, so the merge waits.
+/// The publish happens on the writer thread, which a merge needs to start,
+/// so the merge waits.
 #[test]
 fn race_put_survives_merge_between_append_and_publish() {
     let dir = TempDir::new();
-    let db = store_for_merge_race(&dir);
+    let db = Arc::new(store_for_merge_race(&dir));
 
-    std::thread::scope(|scope| {
-        db.put_with_hook(b"N", b"new", now_unix(), || merge_inside_window(scope, &db))
-            .unwrap();
-    });
+    db.put_with_hook(b"N", b"new", now_unix(), Some(merge_inside_window(&db)))
+        .unwrap();
+    wait_for_other_handles(&db);
 
     assert_eq!(
         db.get(b"N")
@@ -134,12 +137,11 @@ fn race_put_survives_merge_between_append_and_publish() {
 #[test]
 fn race_delete_survives_merge_between_append_and_publish() {
     let dir = TempDir::new();
-    let db = store_for_merge_race(&dir);
+    let db = Arc::new(store_for_merge_race(&dir));
 
-    std::thread::scope(|scope| {
-        db.delete_with_hook(b"K", now_unix(), || merge_inside_window(scope, &db))
-            .unwrap();
-    });
+    db.delete_with_hook(b"K", now_unix(), Some(merge_inside_window(&db)))
+        .unwrap();
+    wait_for_other_handles(&db);
 
     assert_eq!(
         db.get(b"K")
@@ -156,45 +158,50 @@ fn race_delete_survives_merge_between_append_and_publish() {
     );
 }
 
-/// Runs `write` on another thread from inside a write's
-/// append-to-publish window, and gives it up to a second to finish
-/// *inside* that window — the same verdict-by-timeout as
-/// `merge_inside_window`. The first write holds the append lock through
-/// its publish, so the second can't even append until the first has
-/// published: the wait times out and it lands after. If the publish ever
-/// moved back outside the lock, the second write would append after the
-/// first and publish before it.
-fn write_inside_window<'scope, 'env>(
-    scope: &'scope std::thread::Scope<'scope, 'env>,
-    write: impl FnOnce() + Send + 'scope,
-) {
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    scope.spawn(move || {
-        write();
-        let _ = done_tx.send(());
-    });
-    let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+/// Runs `write` on another thread from inside a write's append-to-publish
+/// window, and gives it up to a second to finish *inside* that window —
+/// the same verdict-by-timeout as `merge_inside_window`. The second write
+/// is queued behind the first on the writer thread, so it can't even be
+/// appended until the first has published: the wait times out and it lands
+/// after. If writes could publish out of the writer's order, the second
+/// would append after the first and publish before it.
+fn write_inside_window(write: impl FnOnce() + Send + 'static) -> Hook {
+    Box::new(move || {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            write();
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+    })
 }
 
 /// Two puts of the same key, the second one entirely inside the first's
 /// append-to-publish window. The log holds `v1` then `v2`, so `v2` is the
 /// last write: it's what a reopen recovers. With the publish outside the
-/// append lock, `v1` published last and overwrote `v2` in the keydir, so
+/// writer's order, `v1` published last and overwrote `v2` in the keydir, so
 /// the session read `v1` while the disk said `v2`.
 #[test]
 fn race_two_puts_publish_in_log_order() {
     let dir = TempDir::new();
-    let db = open(&dir);
+    let db = Arc::new(open(&dir));
 
-    std::thread::scope(|scope| {
-        db.put_with_hook(b"K", b"v1", now_unix(), || {
-            write_inside_window(scope, || {
-                db.put(b"K", b"v2", now_unix())
-                    .unwrap()
-            })
-        })
+    let second = Arc::clone(&db);
+    db.put_with_hook(
+        b"K",
+        b"v1",
+        now_unix(),
+        Some(write_inside_window(move || {
+            second
+                .put(b"K", b"v2", now_unix())
+                .unwrap()
+        })),
+    )
+    .unwrap();
+    // The second put may still be in flight: a write after it settles it.
+    db.sync()
         .unwrap();
-    });
+    wait_for_other_handles(&db);
 
     let in_session = db
         .get(b"K")
@@ -212,24 +219,30 @@ fn race_two_puts_publish_in_log_order() {
 
 /// The same window, with a delete as the second write. The log holds
 /// `v1` then a tombstone, so after a reopen the key is gone. With the
-/// publish outside the append lock, `v1` published after the delete had
+/// publish outside the writer's order, `v1` published after the delete had
 /// removed the key, and the session saw a deleted key come back.
 #[test]
 fn race_put_then_delete_publish_in_log_order() {
     let dir = TempDir::new();
-    let db = open(&dir);
+    let db = Arc::new(open(&dir));
     db.put(b"K", b"v0", now_unix())
         .unwrap();
 
-    std::thread::scope(|scope| {
-        db.put_with_hook(b"K", b"v1", now_unix(), || {
-            write_inside_window(scope, || {
-                db.delete(b"K", now_unix())
-                    .unwrap()
-            })
-        })
+    let second = Arc::clone(&db);
+    db.put_with_hook(
+        b"K",
+        b"v1",
+        now_unix(),
+        Some(write_inside_window(move || {
+            second
+                .delete(b"K", now_unix())
+                .unwrap()
+        })),
+    )
+    .unwrap();
+    db.sync()
         .unwrap();
-    });
+    wait_for_other_handles(&db);
 
     let in_session = db
         .get(b"K")
@@ -243,6 +256,19 @@ fn race_put_then_delete_publish_in_log_order() {
         in_session, after_reopen,
         "the keydir must agree with the log"
     );
+}
+
+/// Wait until `db` is the only handle left: the thread a window started
+/// holds a clone until its merge or write returns.
+fn wait_for_other_handles(db: &Arc<Engine>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while Arc::strong_count(db) > 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second write never finished"
+        );
+        std::thread::yield_now();
+    }
 }
 
 /// Merge is paused just before it repoints `K` to the copy it made; another

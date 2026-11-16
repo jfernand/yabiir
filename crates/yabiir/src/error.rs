@@ -21,6 +21,12 @@ pub enum Error {
     /// A range of keys (`Engine::scan`) was asked of a store whose keydir
     /// keeps no order — opened with `key_order: KeyOrder::Hashed`.
     Unordered,
+    /// A write batch's [`Op::Check`](crate::Op::Check) at position `index`
+    /// didn't hold, so nothing in the batch was written.
+    ConditionFailed { index: usize },
+    /// A write batch's operations add up to more than one record can hold:
+    /// 2³² − 1 bytes of keys, values and per-operation headers.
+    BatchTooLarge,
 }
 
 impl fmt::Display for Error {
@@ -37,6 +43,15 @@ impl fmt::Display for Error {
             Error::Unordered => write!(
                 f,
                 "a range of keys needs a sorted keydir: open with key_order: KeyOrder::Sorted"
+            ),
+            Error::ConditionFailed { index } => write!(
+                f,
+                "condition failed: the check at position {index} of the batch didn't hold, so \
+                 nothing was written"
+            ),
+            Error::BatchTooLarge => write!(
+                f,
+                "batch too large: its operations add up to more than 2^32 - 1 bytes"
             ),
         }
     }
@@ -65,7 +80,9 @@ mod tests {
 
     #[test]
     fn display_produces_a_nonempty_message_naming_the_variant() {
-        let cases: [(Error, &str); 7] = [
+        let cases: [(Error, &str); 9] = [
+            (Error::ConditionFailed { index: 3 }, "position 3"),
+            (Error::BatchTooLarge, "batch too large"),
             (Error::Io(std::io::Error::other("boom")), "boom"),
             (Error::AlreadyLocked, "locked"),
             (Error::EmptyKey, "empty"),

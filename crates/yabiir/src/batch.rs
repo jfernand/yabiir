@@ -6,8 +6,10 @@
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::sync::{lock, wait};
@@ -82,6 +84,7 @@ impl Commit {
                 waker: None,
             }),
             decided: Condvar::new(),
+            is_decided: AtomicBool::new(false),
         });
         (
             Self(Inner::Pending(Arc::clone(&slot))),
@@ -95,6 +98,17 @@ impl Commit {
         match self.0 {
             Inner::Ready(outcome) => outcome.expect("a Commit is waited on once"),
             Inner::Pending(slot) => {
+                // A write without an fsync is decided within microseconds,
+                // sooner than this thread could be parked and woken again:
+                // check for a while before sleeping.
+                let spin_until = Instant::now() + SPIN_BEFORE_PARKING;
+                while !slot
+                    .is_decided
+                    .load(Ordering::Acquire)
+                    && Instant::now() < spin_until
+                {
+                    std::hint::spin_loop();
+                }
                 let mut state = lock(&slot.state);
                 loop {
                     if let Some(outcome) = state
@@ -146,7 +160,13 @@ impl Future for Commit {
 struct Slot {
     state: Mutex<State>,
     decided: Condvar,
+    /// Set once `state.outcome` is, for a waiter spinning without the lock.
+    is_decided: AtomicBool,
 }
+
+/// How long [`Commit::wait`] spins before it sleeps, and the writer thread
+/// before it waits for the next batch.
+pub(crate) const SPIN_BEFORE_PARKING: Duration = Duration::from_micros(50);
 
 struct State {
     outcome: Option<Outcome>,
@@ -195,6 +215,8 @@ fn deliver(slot: &Slot, outcome: Outcome) {
     {
         Ok(mut state) => {
             state.outcome = Some(outcome);
+            slot.is_decided
+                .store(true, Ordering::Release);
             state
                 .waker
                 .take()
@@ -211,7 +233,6 @@ fn deliver(slot: &Slot, outcome: Outcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::Wake;
 
     struct Flag(AtomicBool);

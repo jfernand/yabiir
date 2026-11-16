@@ -37,13 +37,14 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::batch::{Completer, Op};
+use crate::batch::{Completer, Op, SPIN_BEFORE_PARKING};
 use crate::datafile::{ActiveFile, DataFileSet};
 use crate::error::Error;
 use crate::format::{self, OpRef};
@@ -287,13 +288,29 @@ impl Worker {
     /// The next command, waiting for one if none is queued. `None` once the
     /// channel is closed and everything sent has been carried out.
     fn next_command(&mut self) -> Option<Command> {
-        self.postponed
+        if let Some(command) = self
+            .postponed
             .pop_front()
-            .or_else(|| {
-                self.received
-                    .recv()
-                    .ok()
-            })
+        {
+            return Some(command);
+        }
+        // A writer that just finished a batch usually gets the next one
+        // within microseconds: look for a while before sleeping, which
+        // spares both sides a wake-up.
+        let spin_until = Instant::now() + SPIN_BEFORE_PARKING;
+        while Instant::now() < spin_until {
+            match self
+                .received
+                .try_recv()
+            {
+                Ok(command) => return Some(command),
+                Err(TryRecvError::Disconnected) => return None,
+                Err(TryRecvError::Empty) => std::hint::spin_loop(),
+            }
+        }
+        self.received
+            .recv()
+            .ok()
     }
 
     /// The next command if one is already queued, without waiting.

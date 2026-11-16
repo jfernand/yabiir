@@ -22,6 +22,17 @@ pub enum KeyOrder {
     Sorted,
 }
 
+/// Which way [`Engine::scan_page`](crate::Engine::scan_page) walks its
+/// range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Direction {
+    /// Ascending key order.
+    #[default]
+    Forward,
+    /// Descending key order.
+    Reverse,
+}
+
 /// A value and its version: see [`Engine::get_versioned`](crate::Engine::get_versioned).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Versioned {

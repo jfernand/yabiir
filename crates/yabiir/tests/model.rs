@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use proptest::prelude::*;
-use yabiir::{Bitcask, Cond, Engine, Error, KeyOrder, Options, now_unix};
+use yabiir::{Bitcask, Cond, Direction, Engine, Error, KeyOrder, Options, now_unix};
 use yabiir_testutil::TempDir;
 
 #[derive(Debug, Clone)]
@@ -185,6 +185,19 @@ fn run_model(ops: Vec<Op>, orders: Orders) {
                 .unwrap(),
             all
         );
+        // Paged, both ways, with versions.
+        for limit in 1..=3 {
+            for direction in [Direction::Forward, Direction::Reverse] {
+                let mut want: Vec<(Vec<u8>, Vec<u8>, u64)> = model
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone(), versions[k]))
+                    .collect();
+                if direction == Direction::Reverse {
+                    want.reverse();
+                }
+                assert_eq!(scan_all_pages(&db, direction, limit), want);
+            }
+        }
     }
     keys.sort();
     assert_eq!(keys, model_keys);
@@ -195,6 +208,33 @@ fn run_model(ops: Vec<Op>, orders: Orders) {
                 .as_ref(),
             model.get(k)
         );
+    }
+}
+
+/// Every live key, value and version, read `limit` at a time.
+fn scan_all_pages(db: &Engine, direction: Direction, limit: usize) -> Vec<(Vec<u8>, Vec<u8>, u64)> {
+    let mut all = Vec::new();
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        let bounds = match (&after, direction) {
+            (None, _) => (Bound::Unbounded, Bound::Unbounded),
+            (Some(a), Direction::Forward) => (Bound::Excluded(a.as_slice()), Bound::Unbounded),
+            (Some(a), Direction::Reverse) => (Bound::Unbounded, Bound::Excluded(a.as_slice())),
+        };
+        let page = db
+            .scan_page(bounds.0, bounds.1, direction, limit)
+            .unwrap();
+        let is_last = page.len() < limit;
+        after = page
+            .last()
+            .map(|(k, _)| k.clone());
+        all.extend(
+            page.into_iter()
+                .map(|(k, found)| (k, found.value, found.version)),
+        );
+        if is_last {
+            return all;
+        }
     }
 }
 

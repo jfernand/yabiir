@@ -75,8 +75,6 @@ enum Map {
 enum Iter<'a> {
     Hashed(hash_map::Iter<'a, Box<[u8]>, KeydirEntry>),
     Sorted(btree_map::Iter<'a, Box<[u8]>, KeydirEntry>),
-    Range(btree_map::Range<'a, Box<[u8]>, KeydirEntry>),
-    Empty,
 }
 
 impl<'a> Iterator for Iter<'a> {
@@ -86,10 +84,39 @@ impl<'a> Iterator for Iter<'a> {
         let (k, v) = match self {
             Iter::Hashed(it) => it.next()?,
             Iter::Sorted(it) => it.next()?,
-            Iter::Range(it) => it.next()?,
-            Iter::Empty => return None,
         };
         Some((k.as_ref(), v))
+    }
+}
+
+/// The `(key, entry)` pairs of a sorted keydir between two bounds, in key
+/// order, from either end: see [`Keydir::range`].
+pub enum RangeIter<'a> {
+    Range(btree_map::Range<'a, Box<[u8]>, KeydirEntry>),
+    Empty,
+}
+
+impl<'a> Iterator for RangeIter<'a> {
+    type Item = (&'a [u8], &'a KeydirEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            RangeIter::Range(it) => it
+                .next()
+                .map(|(k, v)| (k.as_ref(), v)),
+            RangeIter::Empty => None,
+        }
+    }
+}
+
+impl DoubleEndedIterator for RangeIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            RangeIter::Range(it) => it
+                .next_back()
+                .map(|(k, v)| (k.as_ref(), v)),
+            RangeIter::Empty => None,
+        }
     }
 }
 
@@ -180,11 +207,7 @@ impl Keydir {
     /// without visiting every key. Bounds that describe no keys at all (start
     /// after end, or equal with either side excluded) give an empty range
     /// rather than a panic.
-    pub fn range(
-        &self,
-        start: Bound<&[u8]>,
-        end: Bound<&[u8]>,
-    ) -> Option<impl Iterator<Item = (&[u8], &KeydirEntry)>> {
+    pub fn range(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Option<RangeIter<'_>> {
         let Map::Sorted(m) = &self.map else {
             return None;
         };
@@ -195,9 +218,9 @@ impl Keydir {
             _ => false,
         };
         Some(if empty {
-            Iter::Empty
+            RangeIter::Empty
         } else {
-            Iter::Range(m.range::<[u8], _>((start, end)))
+            RangeIter::Range(m.range::<[u8], _>((start, end)))
         })
     }
 

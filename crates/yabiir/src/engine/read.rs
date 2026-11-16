@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::Engine;
-use crate::api::Versioned;
+use crate::api::{Direction, Versioned};
 use crate::datafile::{DataFileSet, pread_exact};
 use crate::error::{Error, Result};
 use crate::keydir::KeydirEntry;
@@ -55,12 +55,24 @@ impl Pinned {
 
     /// Read each pinned entry's value, in the order the entries were pinned.
     fn read(self) -> impl Iterator<Item = Result<(Box<[u8]>, Vec<u8>)>> {
+        self.read_versioned()
+            .map(|found| found.map(|(key, found)| (key, found.value)))
+    }
+
+    /// [`read`](Self::read), with each value's version.
+    fn read_versioned(self) -> impl Iterator<Item = Result<(Box<[u8]>, Versioned)>> {
         let files = self.files;
         self.entries
             .into_iter()
             .map(move |(key, entry)| {
                 let value = read_value(&files[&entry.file_id], entry)?;
-                Ok((key, value))
+                Ok((
+                    key,
+                    Versioned {
+                        value,
+                        version: entry.version,
+                    },
+                ))
             })
     }
 }
@@ -184,6 +196,42 @@ impl Engine {
         pinned
             .read()
             .map(|pair| pair.map(|(key, value)| (key.into_vec(), value)))
+            .collect()
+    }
+
+    /// One page of a scan: up to `limit` live keys between `start` and `end`,
+    /// with their values and versions, in key order or, with
+    /// [`Direction::Reverse`], in reverse key order. Needs a sorted keydir,
+    /// like [`scan`](Self::scan), and reads the page as of one instant.
+    ///
+    /// To read the next page, scan again from just past the last key
+    /// returned: with `start: Bound::Excluded(last)` going forward, or `end:
+    /// Bound::Excluded(last)` in reverse. A page shorter than `limit` is the
+    /// last one. Only the page's values are read from disk.
+    pub fn scan_page(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Versioned)>> {
+        let pinned = self
+            .keydir
+            .with_read(|keydir| match keydir.range(start, end) {
+                Some(range) => match direction {
+                    Direction::Forward => Pinned::pin(&self.files, range.take(limit)),
+                    Direction::Reverse => Pinned::pin(
+                        &self.files,
+                        range
+                            .rev()
+                            .take(limit),
+                    ),
+                },
+                None => Err(Error::Unordered),
+            })?;
+        pinned
+            .read_versioned()
+            .map(|found| found.map(|(key, found)| (key.into_vec(), found)))
             .collect()
     }
 }

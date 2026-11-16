@@ -24,8 +24,8 @@ Sheehy & Smith's 2010 paper (included locally at [`refs/bitcask-intro.pdf`](refs
   traffic
 - A choice of keydir per open, `Options::key_order`: `KeyOrder::Hashed` (the default, fastest point lookups) or
   `KeyOrder::Sorted`, which adds `Engine::scan(start, end)` for ranges of keys in order, `Engine::scan_page` for a
-  page of one either way (with a limit and versions), and makes `fold`/`list_keys` return keys in order. Nothing about it is stored on disk, so a store opens either way. `benches/keydir_order.rs`
-  measures what the order costs
+  page of one either way (with a limit and versions), and makes `fold`/`list_keys` return keys in order. Nothing
+  about it is stored on disk, so a store opens either way. `benches/keydir_order.rs` measures what the order costs
 - A process-level single-writer lock, so two writable (`is_read_write: true`) handles can't corrupt the same directory
 - A small SQL front end over a store, in its own crate (`yabiir-sql`): `SELECT [DISTINCT] * | key | value [WHERE key =
   … | WHERE key BETWEEN … AND …]`, parsed, planned onto `get`/`scan`/`fold`, and executed
@@ -44,6 +44,27 @@ assert_eq!(db.get(b"key")?, Some(b"value".to_vec()));
 db.delete(b"key", now_unix())?;
 db.merge()?; // compact away old versions and deletes, whenever you want
 db.close()?;
+```
+
+A write batch with a condition, here a compare-and-swap on a counter:
+
+```rust
+use yabiir::{Cond, Error, Op};
+
+let current = db.get_versioned(b"hits")?.expect("set earlier");
+let n: u64 = std::str::from_utf8(&current.value)?.parse()?;
+let next = (n + 1).to_string();
+match db
+    .write_batch(vec![
+        Op::Check { key: b"hits".to_vec(), cond: Cond::Version(current.version) },
+        Op::Put { key: b"hits".to_vec(), value: next.into_bytes() },
+    ])
+    .wait() // or `.await`: a Commit is a Future too
+{
+    Ok(_) => {}                                  // written, all of it
+    Err(Error::ConditionFailed { .. }) => {}     // someone wrote first: read again and retry
+    Err(e) => return Err(e.into()),
+}
 ```
 
 See [`examples/basic_usage.rs`](crates/yabiir/examples/basic_usage.rs) for the full API walked through end to end (`put`/`get`/
@@ -75,7 +96,12 @@ cargo run --bin kv -- /tmp/my-data merge
 | [`crates/yabiir-loadtest`](crates/yabiir-loadtest) | `loadtest`, the load generator. |
 | [`crates/yabiir-examples`](crates/yabiir-examples) | Example programs with heavy dependencies. |
 | [`crates/yabiir-testutil`](crates/yabiir-testutil) | A self-removing temporary directory, shared by tests and benches. |
-| [`xtask`](xtask) | Dev tooling: `cargo xtask release`, `cargo xtask bench`. |
+| [`xtask`](xtask) | Dev tooling: `cargo xtask release`, `bench`, `bench-table`, `campaign`. |
+
+Beside the crates: [`book/`](book) is *Append Only*, a book in progress that builds a relational database on yabiir
+one operator at a time (Typst; `book/tools/build.sh`), with its programs in `book/code/`.
+[`bench-history/`](bench-history) holds the recorded Criterion medians of every release, and `report.pdf`, their
+charts with commentary. [`docs/ROADMAP.md`](docs/ROADMAP.md) is what comes next.
 
 Inside the engine, bottom up: `format` (the bytes of a record and of a hint record, in both on-disk formats),
 `datafile` (the files: appending, positioned reads, scanning), `keydir` (the in-memory index), `batch` (write batches,
@@ -108,7 +134,8 @@ consistent. A few design choices follow directly from that:
 Full design writeups — including the profiling methodology and measured before/after numbers — live in
 [`docs/merge-batched-flushing.pdf`](docs/merge-batched-flushing.pdf)
 ([`.typ`](docs/merge-batched-flushing.typ)) and [`docs/group-commit.pdf`](docs/group-commit.pdf)
-([`.typ`](docs/group-commit.typ)).
+([`.typ`](docs/group-commit.typ)). The second describes the group-commit protocol of 0.8 and earlier; 0.9's writer
+thread replaced it, and gets the same sharing of fsyncs by writing every queued batch as one group.
 
 **Tooling, if you want to reproduce or extend this:**
 
@@ -117,10 +144,11 @@ Full design writeups — including the profiling methodology and measured before
   average.
 - `scripts/flamegraph.sh` — wraps `cargo flamegraph --profile profiling --bin loadtest` (the `profiling` Cargo profile
   keeps release optimizations but adds debug symbols so frames resolve to real function names).
-- `cargo bench` — Criterion suites for `format`, `keydir`, `datafile`, and `merge`, each isolating one layer's cost.
-  Note that `benches/merge.rs` fixes `max_file_size: 1` to control the live/dead entry ratio precisely, which as a
-  side effect puts every entry in a file of its own (with its fsync) — so it can't isolate the flush-batching
-  behavior above; that's covered by unit tests and `loadtest` instead.
+- `cargo bench` — Criterion suites for `format`, `keydir`, `keydir_order`, `datafile`, and `merge`, each isolating one
+  layer's cost. Note that `benches/merge.rs` fixes `max_file_size: 1` to control the live/dead entry ratio precisely,
+  which as a side effect puts every entry in a file of its own (with its fsync) — so it can't isolate the
+  flush-batching behavior above; that's covered by unit tests and `loadtest` instead. Its `merge_noop` merges an empty
+  store; `merge_active_only` merges 50 keys still in the active file, which since 0.7 is a real merge.
 - `cargo xtask bench [REF…]` records the Criterion medians of the working tree, or of any tag or commit, in
   `bench-history/`; `cargo xtask bench-table` prints them side by side.
   It warns first about settings that make the clock drift (turbo boost, the frequency governor, an online hyperthread
@@ -129,7 +157,8 @@ Full design writeups — including the profiling methodology and measured before
   interleaved: each benchmark is measured on every version, in a shuffled order, before the next, so the clock's drift
   reaches every version alike. `cargo xtask campaign run 30m` measures for that long and stops between units (or, at
   the deadline, inside one, which is measured again later); further sessions carry on, and the last one writes
-  `bench-history/`. `cargo xtask campaign status` shows what is left.
+  `bench-history/`. `cargo xtask campaign status` shows what is left. The current history is one such campaign over
+  v0.2.0 to v0.8.0; `typst compile bench-history/report.typ` turns it into `report.pdf`.
 
 ## Observability
 
@@ -176,9 +205,9 @@ opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
   error and are not published, but their records may survive a crash and reappear at the next open.
 - **A read-only handle is a snapshot.** It sees the store as it was at open, and it holds no lock, so a merge in the
   writing process can remove files it still needs. Reopen it after a merge.
-- **Reads don't verify CRCs.** An entry's CRC is checked when a file is scanned (recovery, merge), not on `get`.
-- **Corruption in the middle of a file** is skipped entry by entry, using the lengths in the corrupt entry's header. If
-  the header itself is damaged, the rest of that file may be unreadable.
+- **Reads don't verify CRCs.** A record's CRC is checked when a file is scanned (recovery, merge), not on `get`.
+- **Corruption in the middle of a file** is skipped record by record, using the length in the corrupt record's header;
+  a damaged batch is skipped whole. If the length itself is damaged, the rest of that file may be unreadable.
 - **`open` holds one file descriptor per data file.** A store with thousands of unmerged files needs a matching
   `ulimit -n`. Merge regularly.
 - **Every merge rewrites the whole store.** There is no threshold of dead bytes below which a file is left alone.
@@ -192,13 +221,15 @@ opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
 ```sh
 cargo test                                   # unit tests + tests/model.rs's proptest model test
 PROPTEST_CASES=2000 cargo test --test model  # more property-based cases, for extra confidence
-cargo bench                                  # Criterion suites — format, keydir, datafile, merge
+cargo bench                                  # Criterion suites — format, keydir, keydir_order, datafile, merge
 ```
 
-The proptest model test runs random sequences of `put`/`delete`/`get`/`reopen`/`merge` against a plain map as the
-reference model, over a small, deliberately-colliding key alphabet. The races (a merge between a lookup and its read,
-a write during a merge, two writes to one key) are unit tests in `crates/yabiir/src/engine/tests/races.rs`: each uses
-a hook to stop one thread at the exact point of interest, so none depends on timing.
+The proptest model test runs random sequences of `put`/`delete`/`get`/`reopen`/`merge` and write batches with
+conditions against a plain map as the reference model, over a small, deliberately-colliding key alphabet, and checks
+values, versions, and paged scans both ways. The races (a merge between a lookup and its read, a write during a
+merge, two writes to one key) are unit tests in `crates/yabiir/src/engine/tests/races.rs`: each uses a hook to stop
+one thread at the exact point of interest, so none depends on timing. `engine/tests/batches.rs` cuts a batch's record
+at every byte, as a crash would, and checks that recovery keeps all of it or none.
 
 CI (`.github/workflows/ci.yml`) runs `rustfmt --check`, `clippy -D warnings`, and the full test suite (including
 doctests and an extra-cases proptest run) on every push and pull request, on Linux and macOS.
@@ -207,7 +238,9 @@ doctests and an extra-cases proptest run) on every push and pull request, on Lin
 
 Publishing to crates.io (`.github/workflows/publish.yml`) is triggered by pushing a tag matching `v*.*.*`, whose
 version must exactly match `crates/yabiir/Cargo.toml`'s. Only `yabiir` is published; the other crates are
-`publish = false`. After bumping the version and committing that:
+`publish = false`. Bump the version in `crates/yabiir/Cargo.toml` and in the root `Cargo.toml`'s workspace
+dependency, refresh `Cargo.lock` and the book programs' lockfiles (`book/code/ch*/Cargo.lock`, by building them),
+commit that, push, and once CI is green:
 
 ```sh
 cargo xtask release
@@ -220,13 +253,17 @@ refuses to run with a dirty working tree or a tag that already exists, rather th
 silently no-op-ing. `cargo xtask <anything else>` prints the available tasks.
 
 Needs a `CARGO_REGISTRY_TOKEN` repo secret (Settings > Secrets and variables > Actions) — a crates.io API token
-scoped to publish this crate, generated from crates.io's Account Settings > API Tokens.
+scoped to publish this crate (`publish-update`), generated from crates.io's Account Settings > API Tokens. Tokens
+expire: a publish that fails with `403 Forbidden: authentication failed` needs a new one under exactly that name, and
+then a rerun of the failed job (`gh run rerun <id>`); the tag stays as it is.
 
 ## Design notes
 
 The full implementation plan — every design decision and why, walked through milestone by milestone — is in [
 `docs/bitcask-implementation-plan.md`](docs/bitcask-implementation-plan.md). Start there for the on-disk format, the
-keydir, recovery, merge, and locking, in that order.
+keydir, recovery, merge, and locking, in that order. The plan describes format version 1; version 2 (0.9: a file
+header, records holding one or more operations under one CRC, and a sequence number per write) is documented in
+`crates/yabiir/src/format/mod.rs`.
 
 ## License
 

@@ -22,6 +22,13 @@ pub enum KeyOrder {
     Sorted,
 }
 
+/// A value and its version: see [`Engine::get_versioned`](crate::Engine::get_versioned).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Versioned {
+    pub value: Vec<u8>,
+    pub version: u64,
+}
+
 /// How to open a store. See `docs/bitcask-implementation-plan.md` §9 for the
 /// reasoning behind each field.
 #[derive(Clone)]

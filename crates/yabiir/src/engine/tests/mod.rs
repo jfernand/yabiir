@@ -7,6 +7,7 @@ mod races;
 mod reopen;
 mod scan;
 mod sync_on_put;
+mod versions;
 
 use std::path::Path;
 

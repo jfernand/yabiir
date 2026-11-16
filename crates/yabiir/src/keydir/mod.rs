@@ -26,6 +26,11 @@ pub struct KeydirEntry {
     /// header itself — this is exactly what a read seeks/preads from.
     pub value_pos: u64,
     pub timestamp: u32,
+    /// The key's version: the sequence number of the write that put this
+    /// value. Every write gets a higher one than any before it, so a key's
+    /// version changes on every put and never comes back, even across a
+    /// delete.
+    pub version: u64,
 }
 
 /// The keydir itself. Not thread-safe on its own: see [`SharedKeydir`] for

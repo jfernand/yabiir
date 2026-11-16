@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use super::Engine;
 use crate::error::{Error, Result};
-use crate::format::{self, MAX_KEY_LEN, MAX_VALUE_LEN};
+use crate::format::{self, MAX_KEY_LEN, MAX_VALUE_LEN, OP_HEADER_SIZE, OpRef, RECORD_HEADER_SIZE};
 use crate::keydir::KeydirEntry;
 
 impl Engine {
@@ -25,20 +25,29 @@ impl Engine {
         let writer = self.writer()?;
         let start = Instant::now();
 
-        let encoded = format::encode_entry(key, value, false, timestamp);
-        writer.append(&encoded, |file_id, value_pos| {
-            between_append_and_publish();
-            self.keydir
-                .insert(
-                    key,
-                    KeydirEntry {
-                        file_id,
-                        value_size: value.len() as u32,
-                        value_pos,
-                        timestamp,
-                    },
-                );
-        })?;
+        let op = OpRef {
+            key,
+            value,
+            tombstone: false,
+        };
+        let value_offset = (RECORD_HEADER_SIZE + OP_HEADER_SIZE + key.len()) as u64;
+        writer.append(
+            |seq| format::encode_record(seq, timestamp, &[op]),
+            |seq, file_id, record_pos| {
+                between_append_and_publish();
+                self.keydir
+                    .insert(
+                        key,
+                        KeydirEntry {
+                            file_id,
+                            value_size: value.len() as u32,
+                            value_pos: record_pos + value_offset,
+                            timestamp,
+                            version: seq,
+                        },
+                    );
+            },
+        )?;
         self.metrics
             .record_put(start.elapsed());
         Ok(())
@@ -66,12 +75,19 @@ impl Engine {
             .get(key)
             .is_some();
         if is_present {
-            let tombstone = format::encode_entry(key, &[], true, timestamp);
-            writer.append(&tombstone, |_, _| {
-                between_append_and_publish();
-                self.keydir
-                    .remove(key);
-            })?;
+            let op = OpRef {
+                key,
+                value: &[],
+                tombstone: true,
+            };
+            writer.append(
+                |seq| format::encode_record(seq, timestamp, &[op]),
+                |_, _, _| {
+                    between_append_and_publish();
+                    self.keydir
+                        .remove(key);
+                },
+            )?;
         }
         self.metrics
             .record_delete(start.elapsed());

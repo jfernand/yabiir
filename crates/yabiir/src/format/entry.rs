@@ -15,18 +15,10 @@ pub struct Entry {
 }
 
 impl Entry {
+    #[cfg(test)]
     pub(crate) fn is_tombstone(&self) -> bool {
         self.header
             .tombstone
-    }
-
-    /// How far into the entry its value starts: past the header and the key.
-    /// The keydir stores the position of the value, not of the entry.
-    pub(crate) fn value_offset(&self) -> u64 {
-        HEADER_SIZE as u64
-            + self
-                .key
-                .len() as u64
     }
 }
 

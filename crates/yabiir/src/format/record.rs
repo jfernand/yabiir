@@ -46,6 +46,10 @@ impl EncodedRecord {
         &self.bytes
     }
 
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     pub fn len(&self) -> usize {
         self.bytes
             .len()
@@ -81,10 +85,23 @@ pub fn encode_record(seq: u64, tstamp: u32, ops: &[OpRef<'_>]) -> EncodedRecord 
 
     let mut value_offsets = Vec::with_capacity(ops.len());
     for op in ops {
-        debug_assert!(!op.tombstone || op.value.is_empty());
-        let ksz_and_flags = encode_key_size(op.key.len() as u32, op.tombstone);
+        debug_assert!(
+            !op.tombstone
+                || op
+                    .value
+                    .is_empty()
+        );
+        let ksz_and_flags = encode_key_size(
+            op.key
+                .len() as u32,
+            op.tombstone,
+        );
         bytes.extend_from_slice(&ksz_and_flags.to_le_bytes());
-        bytes.extend_from_slice(&(op.value.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(
+            &(op.value
+                .len() as u32)
+                .to_le_bytes(),
+        );
         bytes.extend_from_slice(op.key);
         value_offsets.push(bytes.len() as u64);
         bytes.extend_from_slice(op.value);
@@ -101,7 +118,13 @@ pub fn encode_record(seq: u64, tstamp: u32, ops: &[OpRef<'_>]) -> EncodedRecord 
 /// How many bytes `ops` take in a record's body.
 pub fn body_len(ops: &[OpRef<'_>]) -> u64 {
     ops.iter()
-        .map(|op| OP_HEADER_SIZE as u64 + op.key.len() as u64 + op.value.len() as u64)
+        .map(|op| {
+            OP_HEADER_SIZE as u64
+                + op.key
+                    .len() as u64
+                + op.value
+                    .len() as u64
+        })
         .sum()
 }
 
@@ -265,7 +288,12 @@ mod tests {
         assert_eq!(total_len, encoded.len() as u64);
         assert_eq!(record.seq, 42);
         assert_eq!(record.timestamp, 1_700_000_000);
-        assert_eq!(record.ops.len(), ops.len());
+        assert_eq!(
+            record
+                .ops
+                .len(),
+            ops.len()
+        );
         for (i, (got, want)) in record
             .ops
             .iter()
@@ -277,7 +305,13 @@ mod tests {
             assert_eq!(got.tombstone, want.tombstone);
             assert_eq!(got.value_offset, encoded.value_offset(i));
             let at = got.value_offset as usize;
-            assert_eq!(&encoded.as_bytes()[at..at + want.value.len()], want.value);
+            assert_eq!(
+                &encoded.as_bytes()[at..at
+                    + want
+                        .value
+                        .len()],
+                want.value
+            );
         }
     }
 
@@ -357,10 +391,7 @@ mod tests {
     #[test]
     fn body_len_counts_every_op_header_key_and_value() {
         let ops = [put(b"ab", b"cde"), delete(b"f")];
-        assert_eq!(
-            body_len(&ops),
-            (OP_HEADER_SIZE * 2 + 2 + 3 + 1) as u64
-        );
+        assert_eq!(body_len(&ops), (OP_HEADER_SIZE * 2 + 2 + 3 + 1) as u64);
         assert_eq!(
             encode_record(0, 0, &ops).len() as u64,
             RECORD_HEADER_SIZE as u64 + body_len(&ops)

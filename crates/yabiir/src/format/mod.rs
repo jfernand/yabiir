@@ -83,8 +83,7 @@ pub use file::{
 };
 pub use hint::{
     EncodedHint, HINT_HEADER_SIZE, HINT_TRAILER_SIZE, HINT_V2_HEADER_SIZE, HintRead, HintRecord,
-    decode_hint_file, decode_hint_header, encode_hint, encode_hint_v2, read_hint,
-    verify_hint_file,
+    decode_hint_file, decode_hint_header, encode_hint, encode_hint_v2, read_hint, verify_hint_file,
 };
 pub use record::{
     EncodedRecord, OP_HEADER_SIZE, OpRef, RECORD_HEADER_SIZE, Record, RecordOp, RecordRead,

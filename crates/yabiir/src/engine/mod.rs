@@ -104,7 +104,7 @@ impl Bitcask for Engine {
 
         let file_ids = DataFileSet::discover(dir)?;
         let mut keydir = Keydir::with_order(opts.key_order);
-        recovery::recover(dir, &file_ids, &mut keydir)?;
+        let next_seq = recovery::recover(dir, &file_ids, &mut keydir)?;
 
         // Every recovered file gets its read handle now, before the keydir
         // is shared (see `DataFileSet::handle`).
@@ -126,6 +126,7 @@ impl Bitcask for Engine {
             Some(Writer::new(
                 Arc::clone(&files),
                 next_file_id,
+                next_seq,
                 opts.max_file_size,
                 opts.should_sync_on_put,
             ))

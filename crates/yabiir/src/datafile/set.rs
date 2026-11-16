@@ -58,9 +58,9 @@ impl DataFileSet {
     ///
     /// A hint file left over under the same id, from a file that is gone,
     /// is removed first: it would describe the wrong data.
-    pub fn create_active(&self, file_id: u32) -> io::Result<ActiveFile> {
+    pub fn create_active(&self, file_id: u32, seq_floor: u64) -> io::Result<ActiveFile> {
         remove_if_present(&name::hint_path(&self.dir, file_id))?;
-        let active = ActiveFile::create(&self.dir, file_id)?;
+        let active = ActiveFile::create(&self.dir, file_id, seq_floor)?;
         let reader = Arc::new(active.reader()?);
         write(&self.readers).insert(file_id, reader);
         Ok(active)

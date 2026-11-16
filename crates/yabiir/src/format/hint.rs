@@ -193,13 +193,39 @@ pub struct HintRecord {
 /// [`HINT_MAGIC`](super::HINT_MAGIC), then these records, then the
 /// whole-file CRC trailer over everything before it.
 pub fn encode_hint_v2(record: &HintRecord) -> EncodedHint {
-    let ksz_and_flags = encode_key_size(record.key.len() as u32, record.tombstone);
-    let mut buf = Vec::with_capacity(HINT_V2_HEADER_SIZE + record.key.len());
-    buf.extend_from_slice(&record.seq.to_le_bytes());
-    buf.extend_from_slice(&record.timestamp.to_le_bytes());
+    let ksz_and_flags = encode_key_size(
+        record
+            .key
+            .len() as u32,
+        record.tombstone,
+    );
+    let mut buf = Vec::with_capacity(
+        HINT_V2_HEADER_SIZE
+            + record
+                .key
+                .len(),
+    );
+    buf.extend_from_slice(
+        &record
+            .seq
+            .to_le_bytes(),
+    );
+    buf.extend_from_slice(
+        &record
+            .timestamp
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(&ksz_and_flags.to_le_bytes());
-    buf.extend_from_slice(&record.value_size.to_le_bytes());
-    buf.extend_from_slice(&record.value_pos.to_le_bytes());
+    buf.extend_from_slice(
+        &record
+            .value_size
+            .to_le_bytes(),
+    );
+    buf.extend_from_slice(
+        &record
+            .value_pos
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(&record.key);
     EncodedHint(buf)
 }
@@ -435,7 +461,11 @@ mod tests {
 
     #[test]
     fn a_v2_hint_file_decodes_to_its_records() {
-        let records = vec![v2_record(b"a", 1), v2_record(b"bb", u64::MAX), v2_record(b"", 3)];
+        let records = vec![
+            v2_record(b"a", 1),
+            v2_record(b"bb", u64::MAX),
+            v2_record(b"", 3),
+        ];
         let mut content = crate::format::HINT_MAGIC.to_vec();
         for r in &records {
             content.extend_from_slice(encode_hint_v2(r).as_bytes());

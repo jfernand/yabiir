@@ -9,14 +9,14 @@ use std::thread;
 #[test]
 fn append_then_read_back_matches() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 1).unwrap();
+    let mut active = ActiveFile::create(&dir, 1, 1).unwrap();
 
     let cases: [(&[u8], &[u8]); 3] = [(b"a", b"1"), (b"bb", b"22"), (b"ccc", b"")];
     let mut locations = Vec::new();
     for (key, value) in &cases {
-        let encoded = format::encode_entry(key, value, false, 0);
+        let encoded = crate::testutil::one_op(key, value, false, 0);
         let value_pos = active
-            .append(&encoded)
+            .append_value(&encoded)
             .unwrap();
         let file_id = active.file_id();
         locations.push((file_id, value_pos, value.len() as u32));
@@ -43,22 +43,22 @@ fn manual_rotation_produces_files_with_increasing_ids_and_expected_sizes() {
     let dir = TempDir::new();
     let threshold: u64 = 200;
     let mut file_id = 1u32;
-    let mut active = ActiveFile::create(&dir, file_id).unwrap();
+    let mut active = ActiveFile::create(&dir, file_id, 1).unwrap();
     let mut rotations = 0;
 
     for i in 0..50u32 {
         let key = format!("key-{i}");
         let value = vec![b'x'; 20];
-        let encoded = format::encode_entry(key.as_bytes(), &value, false, 0);
+        let encoded = crate::testutil::one_op(key.as_bytes(), &value, false, 0);
         active
-            .append(&encoded)
+            .append_value(&encoded)
             .unwrap();
         if active.len() >= threshold {
             active
                 .sync()
                 .unwrap();
             file_id += 1;
-            active = ActiveFile::create(&dir, file_id).unwrap();
+            active = ActiveFile::create(&dir, file_id, 1).unwrap();
             rotations += 1;
         }
     }
@@ -91,14 +91,14 @@ fn manual_rotation_produces_files_with_increasing_ids_and_expected_sizes() {
 #[test]
 fn concurrent_reads_on_same_file_id_are_correct() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 1).unwrap();
+    let mut active = ActiveFile::create(&dir, 1, 1).unwrap();
 
     let mut locations = Vec::new();
     for i in 0..64u32 {
         let value = vec![(i % 256) as u8; 37]; // distinct-ish content per index
-        let encoded = format::encode_entry(format!("k{i}").as_bytes(), &value, false, 0);
+        let encoded = crate::testutil::one_op(format!("k{i}").as_bytes(), &value, false, 0);
         let value_pos = active
-            .append(&encoded)
+            .append_value(&encoded)
             .unwrap();
         let file_id = active.file_id();
         locations.push((file_id, value_pos, value));
@@ -140,11 +140,11 @@ fn concurrent_reads_on_same_file_id_are_correct() {
 #[test]
 fn is_empty_reflects_whether_anything_has_been_written() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 1).unwrap();
+    let mut active = ActiveFile::create(&dir, 1, 1).unwrap();
     assert!(active.is_empty());
-    let encoded = format::encode_entry(b"k", b"v", false, 0);
+    let encoded = crate::testutil::one_op(b"k", b"v", false, 0);
     active
-        .append(&encoded)
+        .append_value(&encoded)
         .unwrap();
     assert!(!active.is_empty());
 }
@@ -152,10 +152,10 @@ fn is_empty_reflects_whether_anything_has_been_written() {
 #[test]
 fn active_file_read_at_returns_the_bytes_just_written() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 1).unwrap();
-    let encoded = format::encode_entry(b"k", b"hello", false, 0);
+    let mut active = ActiveFile::create(&dir, 1, 1).unwrap();
+    let encoded = crate::testutil::one_op(b"k", b"hello", false, 0);
     let value_pos = active
-        .append(&encoded)
+        .append_value(&encoded)
         .unwrap();
     // Read directly through ActiveFile's own handle, not DataFileSet —
     // this is the still-active file, and DataFileSet only ever opens
@@ -171,8 +171,8 @@ fn active_file_read_at_returns_the_bytes_just_written() {
 #[test]
 fn flush_makes_buffered_bytes_visible_on_disk() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 1).unwrap();
-    let encoded = format::encode_entry(b"k", b"v", false, 0);
+    let mut active = ActiveFile::create(&dir, 1, 1).unwrap();
+    let encoded = crate::testutil::one_op(b"k", b"v", false, 0);
     active
         .append_buffered(&encoded)
         .unwrap(); // deliberately not flushed
@@ -206,12 +206,12 @@ fn flush_makes_buffered_bytes_visible_on_disk() {
 #[test]
 fn create_active_and_register_cache_handles_that_outlive_unlink() {
     let dir = TempDir::new();
-    let encoded = format::encode_entry(b"k", b"v", false, 0);
+    let encoded = crate::testutil::one_op(b"k", b"v", false, 0);
 
     // A file that already exists when the set is created (recovery's case).
-    let mut existing = ActiveFile::create(&dir, 1).unwrap();
+    let mut existing = ActiveFile::create(&dir, 1, 1).unwrap();
     let existing_pos = existing
-        .append(&encoded)
+        .append_value(&encoded)
         .unwrap();
     drop(existing);
 
@@ -222,10 +222,10 @@ fn create_active_and_register_cache_handles_that_outlive_unlink() {
 
     // A file created through the set (rotation's and merge output's case).
     let mut created = files
-        .create_active(2)
+        .create_active(2, 1)
         .unwrap();
     let created_pos = created
-        .append(&encoded)
+        .append_value(&encoded)
         .unwrap();
 
     for (file_id, pos) in [(1, existing_pos), (2, created_pos)] {
@@ -240,10 +240,10 @@ fn create_active_and_register_cache_handles_that_outlive_unlink() {
 #[test]
 fn forget_evicts_the_cached_read_handle() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 1).unwrap();
-    let encoded = format::encode_entry(b"k", b"v", false, 0);
+    let mut active = ActiveFile::create(&dir, 1, 1).unwrap();
+    let encoded = crate::testutil::one_op(b"k", b"v", false, 0);
     let value_pos = active
-        .append(&encoded)
+        .append_value(&encoded)
         .unwrap();
     let file_id = active.file_id();
     active
@@ -314,7 +314,7 @@ fn a_scan_stops_at_a_header_claiming_more_than_the_file_holds() {
 
     assert_eq!(scanned.len(), 2, "got {scanned:?}");
     assert!(
-        matches!(&scanned[0], Scanned::Entry { offset: 0, entry } if entry.key == b"key"),
+        matches!(&scanned[0], Scanned::Record { offset: 0, record } if record.ops[0].key == b"key"),
         "got {:?}",
         scanned[0]
     );

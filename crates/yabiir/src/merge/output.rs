@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use super::hint::HintWriter;
 use crate::datafile::{ActiveFile, DataFileSet};
-use crate::format::{self, Entry};
+use crate::format::{self, OpRef};
 
 /// How many entries are written between flushes, unless a file fills up
 /// first.
@@ -24,6 +24,8 @@ const FLUSH_BATCH_SIZE: usize = 256;
 pub(super) struct OutputWriter<'a> {
     files: &'a DataFileSet,
     unused_ids: Range<u32>,
+    /// Goes in every output file's header: see `MergeScope::seq_floor`.
+    seq_floor: u64,
     max_file_size: u64,
     current: Option<OutputFile>,
     n_unflushed: usize,
@@ -44,36 +46,56 @@ pub(super) struct Written {
 }
 
 impl<'a> OutputWriter<'a> {
-    pub(super) fn new(files: &'a DataFileSet, ids: Range<u32>, max_file_size: u64) -> Self {
+    pub(super) fn new(
+        files: &'a DataFileSet,
+        ids: Range<u32>,
+        seq_floor: u64,
+        max_file_size: u64,
+    ) -> Self {
         Self {
             files,
             unused_ids: ids,
+            seq_floor,
             max_file_size,
             current: None,
             n_unflushed: 0,
         }
     }
 
-    /// Append a copy of `entry`, a live entry, and its hint record.
-    pub(super) fn write(&mut self, entry: &Entry) -> io::Result<Written> {
-        let encoded = format::encode_entry(
-            &entry.key,
-            &entry.value,
-            false,
-            entry
-                .header
-                .timestamp,
-        );
+    /// Append a copy of a live put of `value` under `key`, written by the
+    /// write with sequence number `seq` at `timestamp`, as a record of its
+    /// own, and its hint record.
+    pub(super) fn write(
+        &mut self,
+        seq: u64,
+        timestamp: u32,
+        key: &[u8],
+        value: &[u8],
+    ) -> io::Result<Written> {
+        let op = OpRef {
+            key,
+            value,
+            tombstone: false,
+        };
+        let encoded = format::encode_record(seq, timestamp, &[op]);
         let output = self.current_file()?;
         let file_id = output
             .data
             .file_id();
         let value_pos = output
             .data
-            .append_buffered(&encoded)?;
+            .append_buffered(&encoded)?
+            + encoded.value_offset(0);
         output
             .hint
-            .write(entry, value_pos)?;
+            .write(&format::HintRecord {
+                seq,
+                timestamp,
+                value_size: value.len() as u32,
+                tombstone: false,
+                value_pos,
+                key: key.to_vec(),
+            })?;
         let is_full = output
             .data
             .len()
@@ -117,7 +139,7 @@ impl<'a> OutputWriter<'a> {
                 .ok_or_else(|| io::Error::other("merge ran out of its reserved file ids"))?;
             let data = self
                 .files
-                .create_active(file_id)?;
+                .create_active(file_id, self.seq_floor)?;
             let hint = HintWriter::create(&DataFileSet::hint_path(
                 self.files
                     .dir(),

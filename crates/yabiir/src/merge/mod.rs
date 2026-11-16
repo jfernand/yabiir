@@ -48,7 +48,7 @@ use std::io;
 
 use crate::datafile::{self, DataFileSet, Scanned};
 use crate::error::Result;
-use crate::format::Entry;
+use crate::format::{Record, RecordOp};
 use crate::keydir::{KeydirEntry, SharedKeydir};
 use crate::metrics::Metrics;
 use crate::writer::{MergeScope, Writer};
@@ -74,12 +74,13 @@ pub(crate) fn merge(
     let MergeScope {
         input_ids,
         output_ids,
+        seq_floor,
     } = scope;
     let mut copier = Copier {
         keydir,
         files,
         metrics,
-        output: OutputWriter::new(files, output_ids, writer.max_file_size()),
+        output: OutputWriter::new(files, output_ids, seq_floor, writer.max_file_size()),
         pending: PendingRepoints::default(),
         n_copied: 0,
         before_repoint,
@@ -131,7 +132,9 @@ impl<H: FnMut(&[u8])> Copier<'_, H> {
         );
         for scanned in datafile::scan(&path)? {
             match scanned? {
-                Scanned::Entry { offset, entry } => self.copy_if_live(file_id, offset, entry)?,
+                Scanned::Record { offset, record } => {
+                    self.copy_live_ops(file_id, offset, record)?
+                }
                 Scanned::Corrupt { offset } => crate::log::warn!(
                     "warning: {} has a corrupt entry at offset {offset} (CRC mismatch); \
                      merge is dropping it",
@@ -145,16 +148,40 @@ impl<H: FnMut(&[u8])> Copier<'_, H> {
         Ok(())
     }
 
-    /// Copy `entry`, found at `offset` of data file `file_id`, if the keydir
-    /// points at exactly that entry.
-    fn copy_if_live(&mut self, file_id: u32, offset: u64, entry: Entry) -> io::Result<()> {
-        if entry.is_tombstone() {
+    /// Copy each operation of `record`, found at `offset` of data file
+    /// `file_id`, that the keydir still points at. A record of several
+    /// operations is a batch that committed, so its live operations can be
+    /// copied one by one: each becomes a record of its own, with the
+    /// batch's sequence number.
+    fn copy_live_ops(&mut self, file_id: u32, offset: u64, record: Record) -> io::Result<()> {
+        let Record {
+            seq,
+            timestamp,
+            ops,
+        } = record;
+        for op in ops {
+            self.copy_if_live(file_id, offset, seq, timestamp, op)?;
+        }
+        Ok(())
+    }
+
+    /// Copy `op`, of the record at `offset` of data file `file_id`, if the
+    /// keydir points at exactly its value.
+    fn copy_if_live(
+        &mut self,
+        file_id: u32,
+        offset: u64,
+        seq: u64,
+        timestamp: u32,
+        op: RecordOp,
+    ) -> io::Result<()> {
+        if op.tombstone {
             return Ok(());
         }
-        let value_pos = offset + entry.value_offset();
+        let value_pos = offset + op.value_offset;
         let old = match self
             .keydir
-            .get(&entry.key)
+            .get(&op.key)
         {
             Some(current) if current.file_id == file_id && current.value_pos == value_pos => {
                 current
@@ -164,14 +191,14 @@ impl<H: FnMut(&[u8])> Copier<'_, H> {
 
         let written = self
             .output
-            .write(&entry)?;
+            .write(seq, timestamp, &op.key, &op.value)?;
         let new = KeydirEntry {
             file_id: written.file_id,
             value_pos: written.value_pos,
             ..old
         };
         self.pending
-            .push(entry.key, old, new);
+            .push(op.key, old, new);
         self.n_copied += 1;
         if written.is_flushed {
             self.apply_pending_repoints();

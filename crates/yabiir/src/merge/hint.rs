@@ -4,10 +4,11 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-use crate::format::{self, Entry};
+use crate::format::{self, HintRecord};
 
-/// Writes one hint file: a record per entry of the data file beside it, then
-/// a CRC32 of all the records (the layout is in `crate::format`).
+/// Writes one version 2 hint file: the magic number, a record per entry of
+/// the data file beside it, then a CRC32 of everything before it (the
+/// layout is in `crate::format`).
 pub(super) struct HintWriter {
     writer: BufWriter<File>,
     crc: crc32fast::Hasher,
@@ -15,16 +16,20 @@ pub(super) struct HintWriter {
 
 impl HintWriter {
     pub(super) fn create(path: &Path) -> io::Result<Self> {
-        Ok(Self {
+        let mut hint = Self {
             writer: BufWriter::new(File::create(path)?),
             crc: crc32fast::Hasher::new(),
-        })
+        };
+        hint.crc
+            .update(&format::HINT_MAGIC);
+        hint.writer
+            .write_all(&format::HINT_MAGIC)?;
+        Ok(hint)
     }
 
-    /// Add the record for `entry`, whose value is at `value_pos` in the data
-    /// file.
-    pub(super) fn write(&mut self, entry: &Entry, value_pos: u64) -> io::Result<()> {
-        let record = format::encode_hint(&entry.key, &entry.header, value_pos);
+    /// Add `record`.
+    pub(super) fn write(&mut self, record: &HintRecord) -> io::Result<()> {
+        let record = format::encode_hint_v2(record);
         self.crc
             .update(record.as_bytes());
         self.writer

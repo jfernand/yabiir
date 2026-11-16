@@ -53,7 +53,7 @@ pub mod format;
 #[doc(hidden)]
 pub mod keydir;
 
-pub use api::{Bitcask, KeyOrder, Options};
+pub use api::{Bitcask, KeyOrder, Options, Versioned};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use metrics::Metrics;

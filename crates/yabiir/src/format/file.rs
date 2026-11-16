@@ -83,16 +83,16 @@ mod tests {
     #[test]
     fn a_header_identifies_as_v2_with_its_floor() {
         let header = encode_file_header(123_456);
-        assert_eq!(
-            identify(&header),
-            FileFormat::V2 { seq_floor: 123_456 }
-        );
+        assert_eq!(identify(&header), FileFormat::V2 { seq_floor: 123_456 });
     }
 
     #[test]
     fn a_v1_file_identifies_as_v1() {
         let entry = encode_entry(b"key", b"value", false, 1_700_000_000);
-        assert_eq!(identify(&entry.as_bytes()[..FILE_HEADER_SIZE]), FileFormat::V1);
+        assert_eq!(
+            identify(&entry.as_bytes()[..FILE_HEADER_SIZE]),
+            FileFormat::V1
+        );
         // Shorter than a header too: a v1 file holding one small entry.
         let small = encode_entry(b"k", b"", false, 0);
         assert!(small.len() < FILE_HEADER_SIZE);

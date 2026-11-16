@@ -18,7 +18,7 @@ fn write_entry(
     tstamp: u32,
 ) -> (u64, u64, format::EntryHeader) {
     let _ = dir;
-    let encoded = format::encode_entry(key, value, tombstone, tstamp);
+    let encoded = crate::testutil::one_op(key, value, tombstone, tstamp);
     let header = format::EntryHeader {
         timestamp: tstamp,
         key_size: key.len() as u32,
@@ -26,7 +26,7 @@ fn write_entry(
         tombstone,
     };
     let value_pos = active
-        .append(&encoded)
+        .append_value(&encoded)
         .unwrap();
     (value_pos, encoded.len() as u64, header)
 }
@@ -57,7 +57,7 @@ fn write_valid_hint_file(dir: &Path, file_id: u32, records: &[(&[u8], u64, forma
 fn full_scan_recovery_is_last_write_wins() {
     let dir = TempDir::new();
 
-    let mut active0 = ActiveFile::create(&dir, 0).unwrap();
+    let mut active0 = ActiveFile::create(&dir, 0, 1).unwrap();
     write_entry(&dir, &mut active0, b"a", b"a-v1", false, 1);
     write_entry(&dir, &mut active0, b"b", b"b-v1", false, 2);
     active0
@@ -65,7 +65,7 @@ fn full_scan_recovery_is_last_write_wins() {
         .unwrap();
     drop(active0);
 
-    let mut active1 = ActiveFile::create(&dir, 1).unwrap();
+    let mut active1 = ActiveFile::create(&dir, 1, 1).unwrap();
     write_entry(&dir, &mut active1, b"a", b"a-v2", false, 3); // overwrites file 0's "a"
     write_entry(&dir, &mut active1, b"c", b"c-v1", false, 4);
     active1
@@ -116,7 +116,7 @@ fn hint_based_recovery_matches_full_scan() {
     // recovered keydir is equivalent (same live values for every key).
     let dir = TempDir::new();
 
-    let mut active0 = ActiveFile::create(&dir, 0).unwrap();
+    let mut active0 = ActiveFile::create(&dir, 0, 1).unwrap();
     let (a_pos, _, a_header) = write_entry(&dir, &mut active0, b"a", b"a-v1", false, 1);
     let (b_pos, _, b_header) = write_entry(&dir, &mut active0, b"b", b"b-v1", false, 2);
     active0
@@ -129,7 +129,7 @@ fn hint_based_recovery_matches_full_scan() {
     // fast path (see try_scan_hint_file), not the fallback.
     write_valid_hint_file(&dir, 0, &[(b"a", a_pos, a_header), (b"b", b_pos, b_header)]);
 
-    let mut active1 = ActiveFile::create(&dir, 1).unwrap();
+    let mut active1 = ActiveFile::create(&dir, 1, 1).unwrap();
     write_entry(&dir, &mut active1, b"a", b"a-v2", false, 3);
     write_entry(&dir, &mut active1, b"c", b"c-v1", false, 4);
     active1
@@ -178,7 +178,7 @@ fn hint_based_recovery_matches_full_scan() {
 #[test]
 fn hint_file_with_invalid_crc_falls_back_to_full_scan() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 0).unwrap();
+    let mut active = ActiveFile::create(&dir, 0, 1).unwrap();
     write_entry(&dir, &mut active, b"a", b"a-v1", false, 1);
     write_entry(&dir, &mut active, b"b", b"b-v1", false, 2);
     active
@@ -242,7 +242,7 @@ fn hint_file_with_invalid_crc_falls_back_to_full_scan() {
 #[test]
 fn hint_file_with_out_of_bounds_pointer_falls_back_to_full_scan() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 0).unwrap();
+    let mut active = ActiveFile::create(&dir, 0, 1).unwrap();
     let (a_pos, _, a_header) = write_entry(&dir, &mut active, b"a", b"a-v1", false, 1);
     active
         .sync()
@@ -293,7 +293,7 @@ fn hint_file_with_out_of_bounds_pointer_falls_back_to_full_scan() {
 #[test]
 fn truncated_tail_keeps_earlier_entries_and_does_not_error() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 0).unwrap();
+    let mut active = ActiveFile::create(&dir, 0, 1).unwrap();
     write_entry(&dir, &mut active, b"a", b"a-v1", false, 1);
     write_entry(&dir, &mut active, b"b", b"b-v1", false, 2);
     let (_, last_total_len, _) = write_entry(&dir, &mut active, b"c", b"c-v1", false, 3);
@@ -343,7 +343,7 @@ fn truncated_tail_keeps_earlier_entries_and_does_not_error() {
 #[test]
 fn corrupt_entry_mid_file_is_skipped_but_scan_continues() {
     let dir = TempDir::new();
-    let mut active = ActiveFile::create(&dir, 0).unwrap();
+    let mut active = ActiveFile::create(&dir, 0, 1).unwrap();
     write_entry(&dir, &mut active, b"a", b"a-v1", false, 1);
     let (b_pos, _, _) = write_entry(&dir, &mut active, b"b", b"b-v1", false, 2);
     write_entry(&dir, &mut active, b"c", b"c-v1", false, 3);
@@ -416,7 +416,7 @@ fn truncation_on_a_non_last_file_still_recovers_what_it_can() {
     // still keep everything decodable before the truncation point, log
     // a warning (not asserted here — stderr), and not error.
     let dir = TempDir::new();
-    let mut active0 = ActiveFile::create(&dir, 0).unwrap();
+    let mut active0 = ActiveFile::create(&dir, 0, 1).unwrap();
     write_entry(&dir, &mut active0, b"a", b"a-v1", false, 1);
     let (_, last_total_len, _) = write_entry(&dir, &mut active0, b"b", b"b-v1", false, 2);
     active0
@@ -435,7 +435,7 @@ fn truncation_on_a_non_last_file_still_recovers_what_it_can() {
         .set_len(full_len - last_total_len.min(3))
         .unwrap();
 
-    let mut active1 = ActiveFile::create(&dir, 1).unwrap();
+    let mut active1 = ActiveFile::create(&dir, 1, 1).unwrap();
     write_entry(&dir, &mut active1, b"c", b"c-v1", false, 3);
     active1
         .sync()

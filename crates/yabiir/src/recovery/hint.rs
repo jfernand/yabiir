@@ -4,16 +4,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::format::{self, EntryHeader, HintRead};
+use super::NextSeq;
+use crate::datafile::pread_exact;
+use crate::format::{self, FILE_HEADER_SIZE, FileFormat, HintRecord};
 use crate::keydir::{Keydir, KeydirEntry};
-
-/// One record of a hint file: a key, and where its value is in the data
-/// file.
-struct Record {
-    header: EntryHeader,
-    value_pos: u64,
-    key: Vec<u8>,
-}
 
 /// Apply the hint file at `hint_path`, which describes data file `file_id`
 /// at `data_path`, to `keydir`. Returns whether it did.
@@ -28,8 +22,12 @@ pub(super) fn replay(
     data_path: &Path,
     file_id: u32,
     keydir: &mut Keydir,
+    next_seq: &mut NextSeq,
 ) -> io::Result<bool> {
-    let data_len = fs::metadata(data_path)?.len();
+    let data_file = fs::File::open(data_path)?;
+    let data_len = data_file
+        .metadata()?
+        .len();
     let records = fs::read(hint_path)
         .map_err(|e| format!("can't be read ({e})"))
         .and_then(|bytes| validate(&bytes, data_len));
@@ -43,7 +41,13 @@ pub(super) fn replay(
             return Ok(false);
         }
     };
+    // The data file's header holds its sequence floor; the hint doesn't.
+    let prefix = pread_exact(&data_file, 0, data_len.min(FILE_HEADER_SIZE as u64) as u32)?;
+    if let FileFormat::V2 { seq_floor } = format::identify(&prefix) {
+        next_seq.at_least(seq_floor);
+    }
     for record in records {
+        next_seq.saw(record.seq);
         apply(keydir, file_id, record);
     }
     Ok(true)
@@ -51,58 +55,36 @@ pub(super) fn replay(
 
 /// Parse a hint file's bytes into its records, or say why it can't be
 /// trusted. `data_len` is the length of the data file it describes.
-fn validate(bytes: &[u8], data_len: u64) -> Result<Vec<Record>, String> {
-    let content = format::verify_hint_file(bytes).ok_or("failed its whole-file CRC check")?;
-    let mut records = Vec::new();
-    let mut cursor = io::Cursor::new(content);
-    // Reading from memory can't fail, hence the `expect`.
-    while let Some(read) = format::read_hint(&mut cursor).expect("reading from memory") {
-        let HintRead::Ok {
-            header,
-            value_pos,
-            key,
-        } = read
-        else {
-            // The CRC covers every byte, so a writer that produced whole
-            // records can't lead here. Checked all the same.
-            return Err("has a truncated record despite a valid CRC".into());
-        };
-        let value_end = value_pos.saturating_add(header.value_size as u64);
+fn validate(bytes: &[u8], data_len: u64) -> Result<Vec<HintRecord>, String> {
+    let records = format::decode_hint_file(bytes)?;
+    for record in &records {
+        let value_end = record
+            .value_pos
+            .saturating_add(record.value_size as u64);
         if value_end > data_len {
             return Err(format!(
-                "points past the end of its data file (value at {value_pos}, {} bytes, in a \
-                 file of {data_len})",
-                header.value_size
+                "points past the end of its data file (value at {}, {} bytes, in a file of \
+                 {data_len})",
+                record.value_pos, record.value_size
             ));
         }
-        records.push(Record {
-            header,
-            value_pos,
-            key,
-        });
     }
     Ok(records)
 }
 
-fn apply(keydir: &mut Keydir, file_id: u32, record: Record) {
+fn apply(keydir: &mut Keydir, file_id: u32, record: HintRecord) {
     // Merge writes no tombstones to hint files today: it drops them. The
     // format allows one, so it is honoured.
-    if record
-        .header
-        .tombstone
-    {
+    if record.tombstone {
         keydir.remove(&record.key);
         return;
     }
     let location = KeydirEntry {
         file_id,
-        value_size: record
-            .header
-            .value_size,
+        value_size: record.value_size,
         value_pos: record.value_pos,
-        timestamp: record
-            .header
-            .timestamp,
+        timestamp: record.timestamp,
+        version: record.seq,
     };
     keydir.insert(&record.key, location);
 }

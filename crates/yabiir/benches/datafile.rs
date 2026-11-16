@@ -12,6 +12,19 @@ use yabiir::datafile::{ActiveFile, DataFileSet};
 use yabiir::format;
 use yabiir_testutil::TempDir;
 
+/// A record of one put, as the engine writes it.
+fn record(key: &[u8], value: &[u8]) -> format::EncodedRecord {
+    format::encode_record(
+        1,
+        0,
+        &[format::OpRef {
+            key,
+            value,
+            tombstone: false,
+        }],
+    )
+}
+
 const VALUE_SIZES: &[usize] = &[64, 1024, 16 * 1024, 32 * 1024, 64 * 1024];
 
 /// `ActiveFile::append` without a sync per write — the common case
@@ -26,13 +39,12 @@ fn bench_append_no_sync(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let dir = TempDir::new();
-                    let active = ActiveFile::create(&dir, 1).unwrap();
+                    let active = ActiveFile::create(&dir, 1, 1).unwrap();
                     (dir, active)
                 },
                 |(dir, mut active)| {
                     for i in 0..100u32 {
-                        let encoded =
-                            format::encode_entry(format!("k{i}").as_bytes(), value, false, 0);
+                        let encoded = record(format!("k{i}").as_bytes(), value);
                         active
                             .append(black_box(&encoded))
                             .unwrap();
@@ -59,11 +71,11 @@ fn bench_append_with_sync(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let dir = TempDir::new();
-                let active = ActiveFile::create(&dir, 1).unwrap();
+                let active = ActiveFile::create(&dir, 1, 1).unwrap();
                 (dir, active)
             },
             |(dir, mut active)| {
-                let encoded = format::encode_entry(b"key", &value, false, 0);
+                let encoded = record(b"key", &value);
                 active
                     .append(black_box(&encoded))
                     .unwrap();
@@ -84,12 +96,13 @@ fn bench_active_file_read_at(c: &mut Criterion) {
     let mut group = c.benchmark_group("active_file_read_at");
     for &size in VALUE_SIZES {
         let dir = TempDir::new();
-        let mut active = ActiveFile::create(&dir, 1).unwrap();
+        let mut active = ActiveFile::create(&dir, 1, 1).unwrap();
         let value = vec![0xEFu8; size];
-        let encoded = format::encode_entry(b"key", &value, false, 0);
-        let value_pos = active
-            .append(&encoded)
-            .unwrap();
+        let encoded = record(b"key", &value);
+        let value_pos = encoded.value_offset(0)
+            + active
+                .append(&encoded)
+                .unwrap();
         active
             .sync()
             .unwrap();
@@ -117,12 +130,13 @@ fn bench_data_file_set_read_at_cached(c: &mut Criterion) {
     let mut group = c.benchmark_group("data_file_set_read_at_cached");
     for &size in VALUE_SIZES {
         let dir = TempDir::new();
-        let mut active = ActiveFile::create(&dir, 1).unwrap();
+        let mut active = ActiveFile::create(&dir, 1, 1).unwrap();
         let value = vec![0x11u8; size];
-        let encoded = format::encode_entry(b"key", &value, false, 0);
-        let value_pos = active
-            .append(&encoded)
-            .unwrap();
+        let encoded = record(b"key", &value);
+        let value_pos = encoded.value_offset(0)
+            + active
+                .append(&encoded)
+                .unwrap();
         let file_id = active.file_id();
         active
             .sync()
@@ -157,7 +171,7 @@ fn bench_discover(c: &mut Criterion) {
     for &n in &[10usize, 100, 1000] {
         let dir = TempDir::new();
         for file_id in 0..n as u32 {
-            ActiveFile::create(&dir, file_id).unwrap();
+            ActiveFile::create(&dir, file_id, 1).unwrap();
         }
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {

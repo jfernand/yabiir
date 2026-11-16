@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::Engine;
+use crate::api::Versioned;
 use crate::datafile::{DataFileSet, pread_exact};
 use crate::error::{Error, Result};
 use crate::keydir::KeydirEntry;
@@ -80,6 +81,32 @@ impl Engine {
         key: &[u8],
         between_lookup_and_read: impl FnOnce(KeydirEntry),
     ) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .read_with_hook(key, between_lookup_and_read)?
+            .map(|found| found.value))
+    }
+
+    /// The current value of `key` and its version, or `Ok(None)` if it has
+    /// none.
+    ///
+    /// A version is the sequence number of the write that stored the value:
+    /// every write gets a higher one than any before it, so the version
+    /// changes on every put of the key and never repeats, not even after the
+    /// key is deleted and put again. That makes it an exact guard for a
+    /// conditional write ([`Cond::Version`](crate::Cond::Version)). A value
+    /// written by yabiir 0.8 or earlier, which recorded no versions, has
+    /// version 1 until it is next written.
+    pub fn get_versioned(&self, key: &[u8]) -> Result<Option<Versioned>> {
+        self.read_with_hook(key, |_| {})
+    }
+
+    /// [`get_versioned`](Self::get_versioned), with the hook
+    /// [`get_with_hook`](Self::get_with_hook) describes.
+    fn read_with_hook(
+        &self,
+        key: &[u8],
+        between_lookup_and_read: impl FnOnce(KeydirEntry),
+    ) -> Result<Option<Versioned>> {
         let start = Instant::now();
         let found = self
             .keydir
@@ -96,7 +123,10 @@ impl Engine {
         let value = match found {
             Some((entry, file)) => {
                 between_lookup_and_read(entry);
-                Some(read_value(&file, entry)?)
+                Some(Versioned {
+                    value: read_value(&file, entry)?,
+                    version: entry.version,
+                })
             }
             None => None,
         };

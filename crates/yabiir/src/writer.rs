@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::commit::GroupCommit;
 use crate::datafile::{ActiveFile, DataFileSet};
-use crate::format::EncodedEntry;
+use crate::format::EncodedRecord;
 use crate::sync::lock;
 
 pub(crate) struct Writer {
@@ -34,6 +34,9 @@ struct State {
     /// The id the next new data file gets. Above every id ever handed out,
     /// whether or not its file was created.
     next_file_id: u32,
+    /// The sequence number the next write gets. Above every one ever handed
+    /// out, whether or not its record reached the log.
+    next_seq: u64,
     /// Set when the fsync that closes a file failed and nobody was told:
     /// the write that filled the file had succeeded, and without
     /// `sync_on_put` no one was waiting on the fsync. The next `sync` or
@@ -51,14 +54,20 @@ pub(crate) struct MergeScope {
     /// The ids reserved for the merge's output files: above every input,
     /// below every file written from now on.
     pub(crate) output_ids: Range<u32>,
+    /// The sequence number the next write will get. Every record in the
+    /// input has a lower one, including the tombstones merge drops, so the
+    /// output files carry it as their floor (see `recovery::recover`).
+    pub(crate) seq_floor: u64,
 }
 
 impl Writer {
     /// A writer for the store in `files`' directory, whose first new data
-    /// file will be `next_file_id`.
+    /// file will be `next_file_id` and whose first write will get sequence
+    /// number `next_seq`.
     pub(crate) fn new(
         files: Arc<DataFileSet>,
         next_file_id: u32,
+        next_seq: u64,
         max_file_size: u64,
         should_sync_on_append: bool,
     ) -> Self {
@@ -67,6 +76,7 @@ impl Writer {
             state: Mutex::new(State {
                 active: None,
                 next_file_id,
+                next_seq,
                 has_unreported_sync_failure: false,
             }),
             group_commit: GroupCommit::new(),
@@ -75,9 +85,10 @@ impl Writer {
         }
     }
 
-    /// Append `encoded` to the active file and run `publish` with the file
-    /// id and the position its value landed at, both under the writer's
-    /// lock. Then close the file if it is full and, with `sync_on_put`, wait
+    /// Give the write the next sequence number, append the record `encode`
+    /// makes with it to the active file, and run `publish` with the sequence
+    /// number, the file id and the position the record landed at, all under
+    /// the writer's lock. Then close the file if it is full and, with `sync_on_put`, wait
     /// for an fsync that covers the entry.
     ///
     /// `publish` is where the caller updates the keydir. Running it under
@@ -96,14 +107,23 @@ impl Writer {
     /// isn't known to be durable.
     pub(crate) fn append(
         &self,
-        encoded: &EncodedEntry,
-        publish: impl FnOnce(u32, u64),
+        encode: impl FnOnce(u64) -> EncodedRecord,
+        publish: impl FnOnce(u64, u32, u64),
     ) -> io::Result<()> {
         let generation = {
             let mut state = lock(&self.state);
-            let active = self.active_file(&mut state)?;
-            let value_pos = match active.append(encoded) {
-                Ok(value_pos) => value_pos,
+            self.active_file(&mut state)?;
+            let seq = state.next_seq;
+            // Spent whether or not the append succeeds: the record may have
+            // reached the file in part.
+            state.next_seq += 1;
+            let active = state
+                .active
+                .as_mut()
+                .expect("created above");
+            let encoded = encode(seq);
+            let record_pos = match active.append(&encoded) {
+                Ok(record_pos) => record_pos,
                 Err(e) => {
                     // The file may now end in part of an entry. Nothing more
                     // goes into it: recovery reads it like the torn tail a
@@ -112,7 +132,7 @@ impl Writer {
                     return Err(e);
                 }
             };
-            publish(active.file_id(), value_pos);
+            publish(seq, active.file_id(), record_pos);
             let is_full = active.len() >= self.max_file_size;
             // Without `sync_on_put` nobody waits for the entry to be durable.
             let generation = self
@@ -225,6 +245,7 @@ impl Writer {
         Ok(Some(MergeScope {
             input_ids,
             output_ids: first_output_id..end_of_output_ids,
+            seq_floor: state.next_seq,
         }))
     }
 
@@ -243,7 +264,7 @@ impl Writer {
                 .ok_or_else(out_of_file_ids)?;
             let active = self
                 .files
-                .create_active(file_id)?;
+                .create_active(file_id, state.next_seq)?;
             // The file's name has to be durable before any entry in it is.
             self.files
                 .sync_dir()?;

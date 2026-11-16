@@ -9,6 +9,7 @@ fn entry(n: u32) -> KeydirEntry {
         value_size: n,
         value_pos: n as u64,
         timestamp: n,
+        version: n as u64,
     }
 }
 

@@ -35,20 +35,60 @@
 //! end-4   4     crc32          CRC32 of every record's bytes, concatenated
 //! ```
 //!
+//! ## Format version 2
+//!
+//! Files written by yabiir 0.9 and later start with a 24-byte header (see
+//! `file.rs`) and hold *records* instead of entries. A record is one or
+//! more operations under one CRC and one sequence number, so a write batch
+//! is recovered whole or not at all (`record.rs`):
+//!
+//! ```text
+//! data file header
+//! 0       8     magic          "ybcdat02"
+//! 8       8     seq_floor      every later write has a sequence number >= this
+//! 16      4     crc32          of bytes [0..16)
+//! 20      4     reserved
+//!
+//! record
+//! 0       4     crc            CRC32 of bytes [4..end) of this record
+//! 4       4     body_len       bytes after this 24-byte header
+//! 8       8     seq            the write's sequence number: the version of
+//!                              every key it puts
+//! 16      4     tstamp
+//! 20      4     n_ops
+//! 24      ...   n_ops times:   ksz_and_flags (4), value_sz (4), key, value
+//! ```
+//!
+//! A version 2 hint file is the magic `"ybchnt02"`, then 28-byte-header
+//! records (`seq` 8, `tstamp` 4, `ksz_and_flags` 4, `value_sz` 4,
+//! `value_pos` 8, key), then the same whole-file CRC32 trailer, covering
+//! everything before it. Version 1 files stay readable, and merge rewrites
+//! them as version 2.
+//!
 //! See `docs/bitcask-implementation-plan.md` §1 for the full rationale,
 //! including why the tombstone flag lives in the top bit of `ksz` rather
 //! than a dedicated flags byte or a magic length sentinel.
 
 mod entry;
+mod file;
 mod hint;
+mod record;
 
 pub use entry::{
     EncodedEntry, Entry, EntryRead, HEADER_SIZE, decode_entry_header, encode_entry, read_entry,
     verify_crc,
 };
+pub use file::{
+    DATA_MAGIC, FILE_HEADER_SIZE, FileFormat, HINT_MAGIC, encode_file_header, identify,
+};
 pub use hint::{
-    EncodedHint, HINT_HEADER_SIZE, HINT_TRAILER_SIZE, HintRead, decode_hint_header, encode_hint,
-    read_hint, verify_hint_file,
+    EncodedHint, HINT_HEADER_SIZE, HINT_TRAILER_SIZE, HINT_V2_HEADER_SIZE, HintRead, HintRecord,
+    decode_hint_file, decode_hint_header, encode_hint, encode_hint_v2, read_hint,
+    verify_hint_file,
+};
+pub use record::{
+    EncodedRecord, OP_HEADER_SIZE, OpRef, RECORD_HEADER_SIZE, Record, RecordOp, RecordRead,
+    body_len, encode_record, read_record,
 };
 
 use std::io::{self, Read};

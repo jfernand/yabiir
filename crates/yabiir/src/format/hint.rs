@@ -170,6 +170,120 @@ pub fn verify_hint_file(bytes: &[u8]) -> Option<&[u8]> {
     }
 }
 
+/// Size of a version 2 hint record's fixed part: sequence number,
+/// timestamp, key length (with the tombstone flag), value length and value
+/// position.
+pub const HINT_V2_HEADER_SIZE: usize = 28;
+
+/// One hint record of either version, decoded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HintRecord {
+    /// The sequence number of the write that the data-file entry records. A
+    /// version 1 hint carries none, and its records read as 1.
+    pub seq: u64,
+    pub timestamp: u32,
+    pub value_size: u32,
+    pub tombstone: bool,
+    /// Where the value starts in the data file.
+    pub value_pos: u64,
+    pub key: Vec<u8>,
+}
+
+/// Encode one version 2 hint record. A version 2 hint file is
+/// [`HINT_MAGIC`](super::HINT_MAGIC), then these records, then the
+/// whole-file CRC trailer over everything before it.
+pub fn encode_hint_v2(record: &HintRecord) -> EncodedHint {
+    let ksz_and_flags = encode_key_size(record.key.len() as u32, record.tombstone);
+    let mut buf = Vec::with_capacity(HINT_V2_HEADER_SIZE + record.key.len());
+    buf.extend_from_slice(&record.seq.to_le_bytes());
+    buf.extend_from_slice(&record.timestamp.to_le_bytes());
+    buf.extend_from_slice(&ksz_and_flags.to_le_bytes());
+    buf.extend_from_slice(&record.value_size.to_le_bytes());
+    buf.extend_from_slice(&record.value_pos.to_le_bytes());
+    buf.extend_from_slice(&record.key);
+    EncodedHint(buf)
+}
+
+/// Every record of a whole hint file of either version, or why the file
+/// can't be trusted. The trailer's CRC is checked before any record is
+/// parsed.
+pub fn decode_hint_file(bytes: &[u8]) -> Result<Vec<HintRecord>, &'static str> {
+    let content = verify_hint_file(bytes).ok_or("failed its whole-file CRC check")?;
+    match content.strip_prefix(&super::HINT_MAGIC) {
+        Some(records) => decode_v2_records(records),
+        None => decode_v1_records(content),
+    }
+}
+
+fn decode_v2_records(mut rest: &[u8]) -> Result<Vec<HintRecord>, &'static str> {
+    const TRUNCATED: &str = "has a truncated record despite a valid CRC";
+    let mut records = Vec::new();
+    while !rest.is_empty() {
+        let header = rest
+            .get(..HINT_V2_HEADER_SIZE)
+            .ok_or(TRUNCATED)?;
+        let field = |at: usize| {
+            u32::from_le_bytes(
+                header[at..at + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let seq = u64::from_le_bytes(
+            header[0..8]
+                .try_into()
+                .unwrap(),
+        );
+        let (key_len, tombstone) = decode_key_size(field(12));
+        let value_pos = u64::from_le_bytes(
+            header[20..28]
+                .try_into()
+                .unwrap(),
+        );
+        let key_end = HINT_V2_HEADER_SIZE
+            .checked_add(key_len as usize)
+            .ok_or(TRUNCATED)?;
+        let key = rest
+            .get(HINT_V2_HEADER_SIZE..key_end)
+            .ok_or(TRUNCATED)?;
+        records.push(HintRecord {
+            seq,
+            timestamp: field(8),
+            value_size: field(16),
+            tombstone,
+            value_pos,
+            key: key.to_vec(),
+        });
+        rest = &rest[key_end..];
+    }
+    Ok(records)
+}
+
+fn decode_v1_records(content: &[u8]) -> Result<Vec<HintRecord>, &'static str> {
+    let mut records = Vec::new();
+    let mut cursor = io::Cursor::new(content);
+    // Reading from memory can't fail, hence the `expect`.
+    while let Some(read) = read_hint(&mut cursor).expect("reading from memory") {
+        let HintRead::Ok {
+            header,
+            value_pos,
+            key,
+        } = read
+        else {
+            return Err("has a truncated record despite a valid CRC");
+        };
+        records.push(HintRecord {
+            seq: 1,
+            timestamp: header.timestamp,
+            value_size: header.value_size,
+            tombstone: header.tombstone,
+            value_pos,
+            key,
+        });
+    }
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +414,76 @@ mod tests {
                 .len(),
             expected_len
         );
+    }
+
+    fn v2_record(key: &[u8], seq: u64) -> HintRecord {
+        HintRecord {
+            seq,
+            timestamp: 7,
+            value_size: 5,
+            tombstone: false,
+            value_pos: seq.wrapping_add(1000),
+            key: key.to_vec(),
+        }
+    }
+
+    fn with_trailer(mut content: Vec<u8>) -> Vec<u8> {
+        let crc = crc32fast::hash(&content);
+        content.extend_from_slice(&crc.to_le_bytes());
+        content
+    }
+
+    #[test]
+    fn a_v2_hint_file_decodes_to_its_records() {
+        let records = vec![v2_record(b"a", 1), v2_record(b"bb", u64::MAX), v2_record(b"", 3)];
+        let mut content = crate::format::HINT_MAGIC.to_vec();
+        for r in &records {
+            content.extend_from_slice(encode_hint_v2(r).as_bytes());
+        }
+        assert_eq!(decode_hint_file(&with_trailer(content)), Ok(records));
+    }
+
+    #[test]
+    fn an_empty_v2_hint_file_decodes_to_nothing() {
+        let file = with_trailer(crate::format::HINT_MAGIC.to_vec());
+        assert_eq!(decode_hint_file(&file), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_v1_hint_file_decodes_with_every_seq_at_one() {
+        let header = EntryHeader {
+            timestamp: 4,
+            key_size: 1,
+            value_size: 2,
+            tombstone: false,
+        };
+        let content = encode_hint(b"k", &header, 99).into_bytes();
+        let got = decode_hint_file(&with_trailer(content)).unwrap();
+        assert_eq!(
+            got,
+            vec![HintRecord {
+                seq: 1,
+                timestamp: 4,
+                value_size: 2,
+                tombstone: false,
+                value_pos: 99,
+                key: b"k".to_vec(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_v2_hint_file_ending_inside_a_record_is_rejected() {
+        let mut content = crate::format::HINT_MAGIC.to_vec();
+        let record = encode_hint_v2(&v2_record(b"key", 1));
+        content.extend_from_slice(&record.as_bytes()[..record.len() - 1]);
+        assert!(decode_hint_file(&with_trailer(content)).is_err());
+    }
+
+    #[test]
+    fn a_hint_file_failing_its_crc_is_rejected() {
+        let mut file = with_trailer(crate::format::HINT_MAGIC.to_vec());
+        file[0] ^= 1;
+        assert!(decode_hint_file(&file).is_err());
     }
 }

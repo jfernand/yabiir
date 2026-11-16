@@ -88,6 +88,30 @@ fn a_version_is_never_reused_after_a_delete_a_merge_and_a_reopen() {
     assert!(new > old + 1, "old {old}, new {new}");
 }
 
+/// The same, when the merge kept nothing at all: no live key, so no record
+/// to copy. The merge's output must still carry the sequence floor, or a
+/// store left with no files reopens counting from 1.
+#[test]
+fn a_version_is_never_reused_after_a_merge_that_kept_nothing() {
+    let dir = TempDir::new();
+    let db = open(&dir);
+    db.put(b"k", b"old", now_unix())
+        .unwrap();
+    let old = version_of(&db, b"k").unwrap();
+    db.delete(b"k", now_unix())
+        .unwrap();
+    db.merge()
+        .unwrap();
+    db.close()
+        .unwrap();
+
+    let db = open(&dir);
+    db.put(b"k", b"new", now_unix())
+        .unwrap();
+    let new = version_of(&db, b"k").unwrap();
+    assert!(new > old + 1, "old {old}, new {new}");
+}
+
 /// Data and hint files as yabiir 0.8 wrote them: no header, entries
 /// instead of records.
 fn write_v1_store(dir: &std::path::Path) {

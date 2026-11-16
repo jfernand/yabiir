@@ -481,10 +481,12 @@ fn merge_takes_every_file_and_later_writes_sort_after_its_output() {
     }
 }
 
-/// A merge with nothing to keep writes nothing: no empty output file is
-/// left behind, and merging an empty store is a no-op.
+/// A merge with nothing to keep leaves one data file with no records, whose
+/// header keeps the sequence floor (see
+/// `a_version_is_never_reused_after_a_merge_that_kept_nothing`); merging an
+/// empty store is a no-op.
 #[test]
-fn merge_of_only_dead_entries_leaves_no_files() {
+fn merge_of_only_dead_entries_leaves_one_empty_file() {
     let dir = TempDir::new();
     let db = Engine::open(&*dir, Options::default()).unwrap();
     db.merge()
@@ -501,17 +503,94 @@ fn merge_of_only_dead_entries_leaves_no_files() {
         .unwrap();
     db.merge()
         .unwrap();
-    assert!(
-        DataFileSet::discover(&dir)
+    let ids = DataFileSet::discover(&dir).unwrap();
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    let path = DataFileSet::data_path(&dir, ids[0]);
+    assert_eq!(
+        fs::metadata(&path)
             .unwrap()
-            .is_empty(),
-        "a value and its tombstone leave nothing to keep"
+            .len(),
+        crate::format::FILE_HEADER_SIZE as u64,
+        "a header and no records"
     );
     assert_eq!(
         db.get(b"k")
             .unwrap(),
         None
     );
+    // Merging it again leaves the same: one empty file.
+    db.merge()
+        .unwrap();
+    assert_eq!(
+        DataFileSet::discover(&dir)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A data file whose header is damaged reads as format 1 garbage, but the
+/// hint file beside it is intact, so the store opens and serves its values.
+/// Merge can't copy them from the data file; it must keep that file, not
+/// remove it and leave the keydir pointing at nothing.
+#[test]
+fn merge_keeps_an_input_file_it_could_not_copy_the_live_values_of() {
+    let dir = TempDir::new();
+    let opts = || Options {
+        max_file_size: 1,
+        ..Options::default()
+    };
+    let db = Engine::open(&*dir, opts()).unwrap();
+    db.put(b"a", b"1", now_unix())
+        .unwrap();
+    db.put(b"b", b"2", now_unix())
+        .unwrap();
+    db.merge()
+        .unwrap();
+    db.close()
+        .unwrap();
+
+    // Damage the magic of the merge's first output file.
+    let damaged = DataFileSet::discover(&dir).unwrap()[0];
+    let path = DataFileSet::data_path(&dir, damaged);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[0] ^= 0x10;
+    fs::write(&path, bytes).unwrap();
+
+    let db = Engine::open(&*dir, opts()).unwrap();
+    assert_eq!(
+        db.get(b"a")
+            .unwrap(),
+        Some(b"1".to_vec()),
+        "served from the hint file's positions"
+    );
+    db.put(b"c", b"3", now_unix())
+        .unwrap();
+    db.merge()
+        .unwrap();
+    assert!(
+        DataFileSet::discover(&dir)
+            .unwrap()
+            .contains(&damaged),
+        "the damaged file stays"
+    );
+    for (k, v) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3")] {
+        assert_eq!(
+            db.get(k)
+                .unwrap(),
+            Some(v.to_vec())
+        );
+    }
+    drop(db);
+    let db = Engine::open(&*dir, opts()).unwrap();
+    for (k, v) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3")] {
+        assert_eq!(
+            db.get(k)
+                .unwrap(),
+            Some(v.to_vec()),
+            "after reopen"
+        );
+    }
 }
 
 /// Merges are serialized: two at once would each take the other's

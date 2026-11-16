@@ -15,7 +15,11 @@
 //!    the key still points at the entry that was copied. A `put` or `delete`
 //!    of the key since then wins, and the copy is left unreferenced.
 //! 4. **Finish.** Fsync the output and the directory.
-//! 5. **Remove** the input files, oldest first.
+//! 5. **Remove** the input files, oldest first, up to the first one the
+//!    keydir still points into: one whose live entries step 2 couldn't
+//!    read, because the file is damaged although the keydir, rebuilt from
+//!    its hint file, can still read the values. That file and every newer
+//!    input stay, and their entries keep being served.
 //!
 //! Reads and writes go on throughout; only step 1 waits for the writer.
 //!
@@ -87,7 +91,7 @@ pub(crate) fn merge(
     };
     copier.copy_live_entries(&input_ids)?;
     let n_copied = copier.finish()?;
-    remove_input_files(files, &input_ids)?;
+    remove_input_files(keydir, files, &input_ids)?;
     metrics.record_merge_summary(input_ids.len(), n_copied);
     Ok(())
 }
@@ -238,17 +242,46 @@ impl<H: FnMut(&[u8])> Copier<'_, H> {
     }
 }
 
-/// Step 5. Nothing in the keydir points into the input any more: a key that
-/// was live there points at the output now, or at a newer write.
+/// Step 5. A key that was live in the input points at the output now, or at
+/// a newer write, unless step 2 couldn't read it: then the keydir still
+/// points into an input file, which must stay.
 ///
-/// Oldest first, stopping at the first failure, so that a file is never
-/// removed while an older one remains (see the module docs).
+/// Oldest first, stopping at the first file that stays or fails to go, so
+/// that a file is never removed while an older one remains (see the module
+/// docs). A kept file is merge input again next time.
 #[cfg_attr(
     feature = "tracing",
     tracing::instrument(skip_all, name = "merge::remove_old_input_files")
 )]
-fn remove_input_files(files: &DataFileSet, input_ids: &[u32]) -> io::Result<()> {
+fn remove_input_files(
+    keydir: &SharedKeydir,
+    files: &DataFileSet,
+    input_ids: &[u32],
+) -> io::Result<()> {
+    // No write since the seal points into the input, so this can't change
+    // while the files are removed.
+    let oldest_in_use = keydir.with_read(|keydir| {
+        keydir
+            .iter()
+            .map(|(_, entry)| entry.file_id)
+            .filter(|id| {
+                input_ids
+                    .binary_search(id)
+                    .is_ok()
+            })
+            .min()
+    });
     for &file_id in input_ids {
+        if let Some(in_use) = oldest_in_use
+            && file_id >= in_use
+        {
+            crate::log::warn!(
+                "warning: merge kept {} and every newer input file: the keydir still points \
+                 into it, at values merge couldn't read from it",
+                DataFileSet::data_path(files.dir(), in_use).display()
+            );
+            break;
+        }
         files.remove(file_id)?;
     }
     files.sync_dir()

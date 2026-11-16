@@ -13,8 +13,8 @@ const FLUSH_BATCH_SIZE: usize = 256;
 
 /// Writes a merge's output: data files, each with a hint file, taking their
 /// ids from the range reserved for this merge and starting a new file when
-/// one reaches `max_file_size`. Nothing is created until there is an entry
-/// to write.
+/// one reaches `max_file_size`. A merge that copies nothing still writes one
+/// file, with no records: see [`finish`](Self::finish).
 ///
 /// Entries are buffered and flushed once per [`FLUSH_BATCH_SIZE`], instead
 /// of once each like the write path does: a flush is a `write` syscall, and
@@ -29,6 +29,8 @@ pub(super) struct OutputWriter<'a> {
     max_file_size: u64,
     current: Option<OutputFile>,
     n_unflushed: usize,
+    /// Whether any output file has been created.
+    has_created_a_file: bool,
 }
 
 struct OutputFile {
@@ -59,6 +61,7 @@ impl<'a> OutputWriter<'a> {
             max_file_size,
             current: None,
             n_unflushed: 0,
+            has_created_a_file: false,
         }
     }
 
@@ -121,7 +124,15 @@ impl<'a> OutputWriter<'a> {
     /// Flush and fsync the last output file, and make the new files' names
     /// durable. After this the merge's output survives a crash, and its
     /// input can be removed.
+    ///
+    /// The output is never empty. Its header carries the sequence floor, and
+    /// once the input is removed it may be the only file that does: after a
+    /// merge that kept nothing, a store with no files at all would reopen
+    /// counting versions from 1 again, and hand out versions it gave before.
     pub(super) fn finish(&mut self) -> io::Result<()> {
+        if !self.has_created_a_file {
+            self.current_file()?;
+        }
         self.close_current_file()?;
         self.files
             .sync_dir()
@@ -146,6 +157,7 @@ impl<'a> OutputWriter<'a> {
                 file_id,
             ))?;
             self.current = Some(OutputFile { data, hint });
+            self.has_created_a_file = true;
         }
         Ok(self
             .current

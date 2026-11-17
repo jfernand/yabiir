@@ -58,8 +58,8 @@ jqwik generates the runs:
 A model of the store checks the values and that versions only grow.
 
 ```sh
-./gradlew -p kotlin check                                  # unit tests + 200 random runs
-./gradlew -p kotlin :difftest:soak -Pdifftest.tries=20000  # a long run
+./gradlew check                                  # from kotlin/: unit tests + 200 random runs
+./gradlew :difftest:soak -Pdifftest.tries=20000  # a long run
 ```
 
 The Gradle build compiles `yabiir-diffd` with cargo, or uses `$YABIIR_DIFFD` if

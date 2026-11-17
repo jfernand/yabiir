@@ -84,4 +84,4 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       # Builds yabiir-diffd (release) itself, then runs the Kotlin unit
       # tests, the corpus replay and the default number of random runs.
-      - run: ./gradlew -p kotlin check
+      - run: kotlin/gradlew -p kotlin check

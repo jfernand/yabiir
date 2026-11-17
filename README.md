@@ -225,7 +225,7 @@ opt-in hooks, per [`docs/ROADMAP.md`](docs/ROADMAP.md)'s observability section:
 cargo test                                   # unit tests + tests/model.rs's proptest model test
 PROPTEST_CASES=2000 cargo test --test model  # more property-based cases, for extra confidence
 cargo bench                                  # Criterion suites — format, keydir, keydir_order, datafile, merge
-./gradlew -p kotlin check                    # the Kotlin port, and its differential tests against this engine
+kotlin/gradlew -p kotlin check               # the Kotlin port, and its differential tests against this engine
 ```
 
 The proptest model test runs random sequences of `put`/`delete`/`get`/`reopen`/`merge` and write batches with

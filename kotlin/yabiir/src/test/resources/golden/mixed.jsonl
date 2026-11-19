@@ -1,0 +1,7 @@
+{"cmd":"seed_v1","dir":"{DIR}","file_id":0,"entries":[{"k":"6f6c64","v":"7631","ts":5},{"k":"676f6e65","v":"78","ts":6},{"k":"6b657074","v":"6b","ts":7}]}
+{"cmd":"open","dir":"{DIR}","max_file_size":4096,"sorted":true}
+{"cmd":"batch","ops":[{"op":"version","k":"6f6c64","version":1},{"op":"put","k":"6f6c64","v":"7632"},{"op":"delete","k":"676f6e65"}],"ts":1001}
+{"cmd":"put","k":"6e6577","v":"6e","ts":1002}
+{"cmd":"merge"}
+{"cmd":"put","k":"6c61746572","v":"6c","ts":1003}
+{"cmd":"close"}

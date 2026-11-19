@@ -24,6 +24,7 @@ public sealed class YabiirException(message: String, cause: Throwable? = null) :
                     is AccessDeniedException -> "PermissionDenied"
                     is FileAlreadyExistsException -> "AlreadyExists"
                     is NotDirectoryException -> "NotADirectory"
+                    is io.github.jfernand.yabiir.datafile.IsADirectoryException -> "IsADirectory"
                     is DirectoryNotEmptyException -> "DirectoryNotEmpty"
                     is java.io.EOFException -> "UnexpectedEof"
                     else -> "Other"

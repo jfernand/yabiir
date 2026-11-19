@@ -54,22 +54,33 @@ class BatchesTest {
             assertArrayEquals(b("old"), db.get(b("k")))
             assertNull(db.get(b("other")))
         }
+        open().use { db -> assertNull(db.get(b("other")), "nothing in the log either") }
     }
 
     @Test
     fun `a version check is a compare and swap, and a recreated key gets a new version`() {
         open().use { db ->
             val created = db.writeBatch(listOf(Op.Check(b("k"), Cond.Absent), Op.Put(b("k"), b("1")))).join()!!
-            assertThrows<YabiirException.ConditionFailed> {
+            // A second create fails: the key exists now.
+            val again = assertThrows<YabiirException.ConditionFailed> {
                 db.writeBatch(listOf(Op.Check(b("k"), Cond.Absent), Op.Put(b("k"), b("x")))).join()
             }
+            assertEquals(0, again.index)
             val updated = db.writeBatch(listOf(Op.Check(b("k"), Cond.Version(created)), Op.Put(b("k"), b("2")))).join()!!
             assertTrue(updated > created)
+            // The same swap again is stale.
+            val stale = assertThrows<YabiirException.ConditionFailed> {
+                db.writeBatch(listOf(Op.Check(b("k"), Cond.Version(created)), Op.Put(b("k"), b("3")))).join()
+            }
+            assertEquals(0, stale.index)
+            // Delete and recreate: the old version doesn't match the new value.
             db.delete(b("k"))
             db.put(b("k"), b("again"))
-            assertThrows<YabiirException.ConditionFailed> {
+            val recreated = assertThrows<YabiirException.ConditionFailed> {
                 db.writeBatch(listOf(Op.Check(b("k"), Cond.Version(updated)), Op.Put(b("k"), b("4")))).join()
             }
+            assertEquals(0, recreated.index)
+            assertArrayEquals(b("again"), db.get(b("k")))
         }
     }
 
@@ -156,6 +167,64 @@ class BatchesTest {
         open().use { db ->
             assertArrayEquals(b("22"), db.get(b("b")))
             assertEquals(v, db.getVersioned(b("c"))!!.version)
+        }
+    }
+
+    @Test
+    fun `later ops on a key win within a batch`() {
+        open().use { db ->
+            db.writeBatch(listOf(Op.Put(b("k"), b("1")), Op.Delete(b("k")), Op.Put(b("k"), b("3")))).join()
+            assertArrayEquals(b("3"), db.get(b("k")))
+            db.writeBatch(listOf(Op.Put(b("j"), b("1")), Op.Delete(b("j")))).join()
+            assertNull(db.get(b("j")))
+        }
+        open().use { db ->
+            assertArrayEquals(b("3"), db.get(b("k")))
+            assertNull(db.get(b("j")))
+        }
+    }
+
+    @Test
+    fun `checks see the store before the batch`() {
+        open().use { db ->
+            // The put comes first in the batch, but the check is against the
+            // store as it was: the key is absent.
+            db.writeBatch(listOf(Op.Put(b("k"), b("1")), Op.Check(b("k"), Cond.Absent))).join()
+            assertArrayEquals(b("1"), db.get(b("k")))
+        }
+    }
+
+    @Test
+    fun `a batch with nothing to write resolves to none`() {
+        open().use { db ->
+            assertNull(db.writeBatch(listOf(Op.Check(b("k"), Cond.Absent), Op.Delete(b("k")))).join())
+            assertNull(db.writeBatch(emptyList()).join())
+            assertTrue(discover(dir).isEmpty(), "nothing to write creates no file")
+        }
+    }
+
+    /** Commits are futures too: this waits on [Commit.future] without [Commit.join]. */
+    @Test
+    fun `a commit can be awaited`() {
+        open().use { db ->
+            val commit = db.writeBatch(listOf(Op.Put(b("k"), b("v"))))
+            while (!commit.future.isDone) Thread.yield()
+            assertTrue(commit.future.get() != null)
+            assertArrayEquals(b("v"), db.get(b("k")))
+        }
+    }
+
+    /**
+     * Merge copies a batch's live operations one record each, so its output
+     * can be larger than its input. The ids merge reserves for its output
+     * must cover that.
+     */
+    @Test
+    fun `merge of a batch of tiny puts has enough output ids`() {
+        open(Options(maxFileSize = 200)).use { db ->
+            db.writeBatch((0 until 40).map { Op.Put(byteArrayOf('k'.code.toByte(), it.toByte()), ByteArray(0)) }).join()
+            db.merge()
+            for (i in 0 until 40) assertArrayEquals(ByteArray(0), db.get(byteArrayOf('k'.code.toByte(), i.toByte())))
         }
     }
 

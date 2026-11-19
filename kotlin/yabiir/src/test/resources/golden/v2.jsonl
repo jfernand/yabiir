@@ -1,0 +1,11 @@
+{"cmd":"open","dir":"{DIR}","max_file_size":64}
+{"cmd":"put","k":"61","v":"31","ts":1001}
+{"cmd":"put","k":"62","v":"0102030405060708090a0b0c0d0e0f10111213141516171819","ts":1002}
+{"cmd":"batch","ops":[{"op":"absent","k":"63"},{"op":"put","k":"63","v":"33"},{"op":"put","k":"ff00","v":""},{"op":"delete","k":"7a"}],"ts":1003}
+{"cmd":"batch","ops":[{"op":"version","k":"61","version":1},{"op":"put","k":"61","v":"32"}],"ts":1004}
+{"cmd":"delete","k":"63","ts":1005}
+{"cmd":"put","k":"00","v":"7a65726f","ts":1006}
+{"cmd":"merge"}
+{"cmd":"put","k":"64","v":"34","ts":1007}
+{"cmd":"delete","k":"62","ts":1008}
+{"cmd":"close"}

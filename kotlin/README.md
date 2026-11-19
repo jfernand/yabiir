@@ -33,11 +33,26 @@ Engine.open(Path.of("store"), Options(keyOrder = KeyOrder.SORTED)).use { db ->
 | `lock.rs` | `Lock.kt` |
 | `engine/`, `api.rs`, `error.rs` | `Engine.kt`, `Api.kt`, `Errors.kt` |
 
+The unit tests in `yabiir/src/test` port the Rust crate's tests file by file, as
+`<RustFile>Test.kt`. The proptest models (`tests/model.rs`) became jqwik
+properties in `ModelTest`.
+
 Differences from the Rust crate:
 - Errors are exceptions: `YabiirException` has one subclass per Rust `Error` variant.
 - Timestamps are `Long`s that must fit in 32 unsigned bits.
 - The directory lock is a POSIX record lock, which doesn't exclude a Rust process
   holding the `flock`. Don't open one store from both at once.
+
+## Golden files
+
+`yabiir/src/test/resources/golden/` holds stores the Rust engine wrote: a format-1
+store, a format-2 store with merge output and hint files, and a mix of the two.
+`GoldenTest` checks two things:
+- the Kotlin engine reads from them what Rust read;
+- every data and hint file decodes and encodes back to the same bytes.
+
+Each store is made from the trace next to it (`<name>.jsonl`). After a format
+change, rerun `regenerate.sh` and commit what it writes.
 
 ## Differential tests
 
@@ -59,6 +74,7 @@ A model of the store checks the values and that versions only grow.
 
 ```sh
 ./gradlew check                                  # from kotlin/: unit tests + 200 random runs
+./gradlew :yabiir:test -Pmodel.tries=2000        # more model cases (Rust's PROPTEST_CASES)
 ./gradlew :difftest:soak -Pdifftest.tries=20000  # a long run
 ```
 

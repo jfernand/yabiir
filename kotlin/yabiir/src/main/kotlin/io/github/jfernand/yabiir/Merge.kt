@@ -48,7 +48,7 @@ internal fun merge(
 ) {
     val scope = writer.sealForMerge() ?: return
     val output = OutputWriter(files, scope.firstOutputId, scope.endOfOutputIds, scope.seqFloor, writer.maxFileSize)
-    val copier = Copier(keydir, files, output, beforeRepoint)
+    val copier = Copier(keydir, files, output, metrics, beforeRepoint)
     for (fileId in scope.inputIds) copier.copyLiveEntriesOf(fileId)
     val nCopied = copier.finish()
     removeInputFiles(keydir, files, scope.inputIds)
@@ -83,6 +83,7 @@ private class Copier(
     private val keydir: SharedKeydir,
     private val files: DataFileSet,
     private val output: OutputWriter,
+    private val metrics: Metrics,
     private val beforeRepoint: (ByteArray) -> Unit,
 ) {
     private val pending = ArrayList<Repoint>()
@@ -116,6 +117,7 @@ private class Copier(
     }
 
     private fun applyPendingRepoints() {
+        if (pending.isNotEmpty()) metrics.recordPendingQueueDepth(pending.size)
         for (r in pending) {
             beforeRepoint(r.key)
             keydir.casRepoint(r.key, r.old, r.new)

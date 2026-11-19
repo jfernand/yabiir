@@ -145,7 +145,7 @@ public class DataFileSet(public val dir: Path) : AutoCloseable {
 
     /** Create [fileId] as the new active file, removing any stale hint file of that id. */
     public fun createActive(fileId: Long, seqFloor: Long): ActiveFile {
-        Files.deleteIfExists(hintPath(dir, fileId))
+        removeIfPresent(hintPath(dir, fileId))
         val active = ActiveFile.create(dir, fileId, seqFloor)
         unwrapped { readers.computeIfAbsent(fileId) { open(it) } }
         return active
@@ -165,8 +165,8 @@ public class DataFileSet(public val dir: Path) : AutoCloseable {
 
     /** Remove data file [fileId] and its hint file. */
     public fun remove(fileId: Long) {
-        Files.deleteIfExists(hintPath(dir, fileId))
-        Files.deleteIfExists(dataPath(dir, fileId))
+        removeIfPresent(hintPath(dir, fileId))
+        removeIfPresent(dataPath(dir, fileId))
         forget(fileId)
     }
 
@@ -287,4 +287,17 @@ public class Scan(path: Path) : Iterator<Scanned>, AutoCloseable {
     override fun close() {
         input.close()
     }
+}
+
+/** Thrown where Rust's `fs::remove_file` fails with `IsADirectory`. */
+internal class IsADirectoryException(path: Path) : java.nio.file.FileSystemException(path.toString(), null, "Is a directory")
+
+/**
+ * Remove the file at [path] if there is one, like Rust's `fs::remove_file`:
+ * a directory there is an error, where `Files.deleteIfExists` would remove
+ * an empty one.
+ */
+internal fun removeIfPresent(path: Path) {
+    if (Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw IsADirectoryException(path)
+    Files.deleteIfExists(path)
 }

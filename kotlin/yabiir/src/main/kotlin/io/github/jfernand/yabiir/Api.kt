@@ -46,6 +46,12 @@ public interface Metrics {
 
     public fun recordSync(elapsed: Duration) {}
 
+    /**
+     * How many copies merge repointed at once: called each time it flushes
+     * its output, including the last time, when there are any to repoint.
+     */
+    public fun recordPendingQueueDepth(depth: Int) {}
+
     public fun recordMergeSummary(inputFiles: Int, entriesCopied: Int) {}
 }
 

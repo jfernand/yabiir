@@ -54,6 +54,16 @@ store, a format-2 store with merge output and hint files, and a mix of the two.
 Each store is made from the trace next to it (`<name>.jsonl`). After a format
 change, rerun `regenerate.sh` and commit what it writes.
 
+## Load test
+
+`loadtest/` ports `crates/yabiir-loadtest`, with the same options and output.
+`../scripts/loadtest-compare.py` builds both, runs them on the same workloads in
+alternation, and compares throughput and latency:
+
+```sh
+scripts/loadtest-compare.py --rounds 3 --duration 15 --cpus 2-5   # from the repository root
+```
+
 ## Differential tests
 
 `difftest/` runs the Kotlin engine in process and the Rust engine in a

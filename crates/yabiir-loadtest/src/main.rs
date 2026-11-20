@@ -94,6 +94,11 @@ struct Args {
     /// Write every recorded sample to this CSV file (elapsed_secs,op,latency_ns).
     #[arg(long)]
     csv: Option<PathBuf>,
+
+    /// Write the final summary to this file as JSON, for comparing runs
+    /// (`scripts/loadtest-compare.py` compares this tool with the Kotlin port's).
+    #[arg(long)]
+    summary_json: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -337,6 +342,9 @@ fn main() {
     }
 
     print_summary(&mut all_samples);
+    if let Some(path) = &args.summary_json {
+        write_summary_json(path, &args, &mut all_samples);
+    }
     let _ = run
         .db
         .close();
@@ -515,4 +523,32 @@ fn print_summary(all_samples: &mut HashMap<OpKind, Vec<u64>>) {
             );
         }
     }
+}
+
+/// Write the percentiles of everything recorded as JSON: `{"engine", "duration_secs",
+/// "ops": {kind: {"n", "p50_ns", "p90_ns", "p99_ns", "p999_ns", "max_ns"}}}`.
+fn write_summary_json(path: &PathBuf, args: &Args, all_samples: &mut HashMap<OpKind, Vec<u64>>) {
+    let mut ops = Vec::new();
+    for kind in ALL_KINDS {
+        if let Some(v) = all_samples.get_mut(&kind) {
+            v.sort_unstable();
+            ops.push(format!(
+                "\"{}\":{{\"n\":{},\"p50_ns\":{},\"p90_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"max_ns\":{}}}",
+                kind.label(),
+                v.len(),
+                percentile(v, 0.50),
+                percentile(v, 0.90),
+                percentile(v, 0.99),
+                percentile(v, 0.999),
+                v.last()
+                    .unwrap()
+            ));
+        }
+    }
+    let json = format!(
+        "{{\"engine\":\"rust\",\"duration_secs\":{},\"ops\":{{{}}}}}\n",
+        args.duration_secs,
+        ops.join(",")
+    );
+    std::fs::write(path, json).expect("failed to write --summary-json file");
 }

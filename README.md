@@ -145,6 +145,9 @@ thread replaced it, and gets the same sharing of fsyncs by writing every queued 
 - `crates/yabiir-loadtest` (`cargo run --release --bin loadtest -- <dir>`) — a configurable mixed get/put/delete load generator that reports periodic p50/p90/p99/p99.9/max
   latency per operation kind, specifically so pauses show up as a visible spike rather than getting smoothed into an
   average.
+- `scripts/loadtest-compare.py` — runs `loadtest` and its Kotlin port (`kotlin/loadtest`) on the same workloads,
+  alternating them, and prints a table of throughput and latency percentiles for both (`--help` for the workloads,
+  rounds and CPU pinning).
 - `scripts/flamegraph.sh` — wraps `cargo flamegraph --profile profiling --bin loadtest` (the `profiling` Cargo profile
   keeps release optimizations but adds debug symbols so frames resolve to real function names).
 - `cargo bench` — Criterion suites for `format`, `keydir`, `keydir_order`, `datafile`, and `merge`, each isolating one

@@ -4,4 +4,4 @@ dependencyResolutionManagement {
     repositories { mavenCentral() }
 }
 
-include("yabiir", "difftest")
+include("yabiir", "difftest", "loadtest")

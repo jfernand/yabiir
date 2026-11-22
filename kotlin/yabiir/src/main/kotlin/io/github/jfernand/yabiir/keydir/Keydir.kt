@@ -6,9 +6,8 @@ import io.github.jfernand.yabiir.KeyOrder
 import java.util.Arrays
 import java.util.NavigableMap
 import java.util.TreeMap
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantReadWriteLock
-import kotlin.concurrent.read
-import kotlin.concurrent.write
 
 /** A key: bytes with content equality, ordered as unsigned bytes. */
 public class Key(public val bytes: ByteArray) : Comparable<Key> {
@@ -94,12 +93,68 @@ private fun Bound.key(): Key? =
 public class SharedKeydir(private val keydir: Keydir) {
     private val lock = ReentrantReadWriteLock()
 
-    public operator fun get(key: ByteArray): KeydirEntry? = lock.read { keydir[key] }
+    public operator fun get(key: ByteArray): KeydirEntry? = withRead { it[key] }
 
     public fun casRepoint(key: ByteArray, expectedOld: KeydirEntry, new: KeydirEntry): Boolean =
-        lock.write { keydir.casRepoint(key, expectedOld, new) }
+        withWrite { it.casRepoint(key, expectedOld, new) }
 
-    public fun <R> withRead(f: (Keydir) -> R): R = lock.read { f(keydir) }
+    public fun <R> withRead(f: (Keydir) -> R): R {
+        lockRead()
+        try {
+            return f(keydir)
+        } finally {
+            lock.readLock().unlock()
+        }
+    }
 
-    public fun <R> withWrite(f: (Keydir) -> R): R = lock.write { f(keydir) }
+    public fun <R> withWrite(f: (Keydir) -> R): R {
+        lockWrite()
+        try {
+            return f(keydir)
+        } finally {
+            lock.writeLock().unlock()
+        }
+    }
+
+    // Both sides spin a little before they park, as Rust's RwLock does: the
+    // lock is held for a few microseconds at a time, less than parking and
+    // waking a thread costs. While a writer spins for the lock it says so in
+    // [writersSpinning], and new readers wait for it rather than join the
+    // readers it is waiting out, so it usually gets the lock without parking.
+    // A reader that has to park still doesn't jump ahead of a queued writer.
+    // 5 µs was tuned with scripts/loadtest-compare.py: much longer burns the
+    // core the lock's holder needs (p99 gets sat at the limit), much shorter
+    // parks threads again (p99.9 rose with the sorted keydir).
+    private val writersSpinning = AtomicInteger()
+
+    private fun lockRead() {
+        if (!lock.isWriteLockedByCurrentThread) {
+            val deadline = System.nanoTime() + SPIN_NANOS
+            while (writersSpinning.get() > 0 || lock.isWriteLocked || lock.hasQueuedThreads()) {
+                if (System.nanoTime() > deadline) break
+                Thread.onSpinWait()
+            }
+        }
+        lock.readLock().lock()
+    }
+
+    private fun lockWrite() {
+        val write = lock.writeLock()
+        if (write.tryLock()) return
+        writersSpinning.incrementAndGet()
+        try {
+            val deadline = System.nanoTime() + SPIN_NANOS
+            while (System.nanoTime() < deadline) {
+                Thread.onSpinWait()
+                if (write.tryLock()) return
+            }
+        } finally {
+            writersSpinning.decrementAndGet()
+        }
+        write.lock()
+    }
+
+    private companion object {
+        const val SPIN_NANOS: Long = 5_000
+    }
 }

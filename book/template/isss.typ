@@ -562,7 +562,7 @@
 }
 
 // ─── Title page ────────────────────────────────────────────────────────────
-#let title-page(title: none, display-title: none, subtitle: none, author: none, edition: none, band: none) = page(
+#let title-page(title: none, display-title: none, subtitle: none, author: none, credit: none, edition: none, band: none) = page(
   fill: c.black, header: none, footer: none, margin: (x: 2.2cm, top: 2.4cm, bottom: 2cm),
 )[
   #set text(fill: c.paper)
@@ -582,12 +582,12 @@
   #line(length: 100%, stroke: 0.75pt + c.steel-700)
   #v(4pt)
   #grid(columns: (1fr, auto),
-    kicker(author, fill: c.paper, size: ts.sm),
+    kicker(if credit != none { credit } else { author }, fill: c.paper, size: ts.sm),
     kicker("Technology before enshittification.", fill: c.steel-500, size: ts.sm))
 ]
 
 // ─── Main template ─────────────────────────────────────────────────────────
-#let book(title: "", display-title: none, subtitle: none, author: none, edition: none, band: none, cover: true, body) = {
+#let book(title: "", display-title: none, subtitle: none, author: none, credit: none, edition: none, band: none, cover: true, body) = {
   set document(title: title, author: if author != none { author } else { () })
 
   set page(
@@ -779,7 +779,7 @@
   // Math ----------------------------------------------------------------
   show math.equation: set text(font: ("New Computer Modern Math",))
 
-  if cover { title-page(title: title, display-title: display-title, subtitle: subtitle, author: author, edition: edition, band: band) }
+  if cover { title-page(title: title, display-title: display-title, subtitle: subtitle, author: author, credit: credit, edition: edition, band: band) }
   body
 }
 

@@ -55,7 +55,7 @@ Every index makes reads cheaper and writes more expensive:
   pay for their complexity.
 ]
 
-== Atomic write batches
+== Atomic write batches <sec-batches>
 
 A _write batch_ is a list of writes that the store applies together or not at all. yabiir's has a
 third kind of operation beside the put and the delete, a _check_, which writes nothing and fails the

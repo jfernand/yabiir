@@ -1,0 +1,174 @@
+$ sql DIR "INSERT INTO store VALUES ('apple-ii', 'apple', 1977)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('ibm-pc', 'ibm', 1981)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('bbc-micro', 'acorn', 1981)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('zx-spectrum', 'sinclair', 1982)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('c64', 'commodore', 1982)"
+inserted 1 row
+
+$ dump-value DIR zx-spectrum
+02 08 00 00 00 73 69 6e 63 6c 61 69 72 01 be 07  .....sinclair...
+00 00 00 00 00 00                                ......
+(22 bytes)
+
+$ sql DIR "SELECT *"
+plan:
+  FullScan (fold: every row)
+ key         | maker     | year
+-------------+-----------+------
+ apple-ii    | apple     | 1977
+ zx-spectrum | sinclair  | 1982
+ bbc-micro   | acorn     | 1981
+ c64         | commodore | 1982
+ ibm-pc      | ibm       | 1981
+(5 rows)
+rows visited: 5
+
+$ sql DIR "SELECT key, year"
+plan:
+  Project key, year
+    FullScan (fold: every row)
+ key         | year
+-------------+------
+ bbc-micro   | 1981
+ apple-ii    | 1977
+ ibm-pc      | 1981
+ zx-spectrum | 1982
+ c64         | 1982
+(5 rows)
+rows visited: 5
+
+$ sql DIR "SELECT maker WHERE key = 'zx-spectrum'"
+plan:
+  Project maker
+    Get 'zx-spectrum' (get: one lookup)
+ maker
+----------
+ sinclair
+(1 row)
+rows visited: 1
+
+$ sql DIR "SELECT key, maker WHERE year = 1982"
+plan:
+  Project key, maker
+    Filter year = 1982
+      FullScan (fold: every row)
+ key         | maker
+-------------+-----------
+ c64         | commodore
+ zx-spectrum | sinclair
+(2 rows)
+rows visited: 5
+
+$ sql DIR "SELECT key WHERE year BETWEEN 1978 AND 1981"
+plan:
+  Project key
+    Filter year BETWEEN 1978 AND 1981
+      FullScan (fold: every row)
+ key
+-----------
+ ibm-pc
+ bbc-micro
+(2 rows)
+rows visited: 5
+
+$ sql DIR "SELECT year"
+plan:
+  Project year
+    FullScan (fold: every row)
+ year
+------
+ 1982
+ 1982
+ 1981
+ 1977
+ 1981
+(5 rows)
+rows visited: 5
+
+$ sql DIR "SELECT DISTINCT year"
+plan:
+  Distinct
+    Project year
+      FullScan (fold: every row)
+ year
+------
+ 1981
+ 1982
+ 1977
+(3 rows)
+rows visited: 5
+
+$ sql DIR "SELECT DISTINCT key, year"
+plan:
+  Project key, year
+    FullScan (fold: every row)
+ key         | year
+-------------+------
+ apple-ii    | 1977
+ bbc-micro   | 1981
+ c64         | 1982
+ ibm-pc      | 1981
+ zx-spectrum | 1982
+(5 rows)
+rows visited: 5
+
+$ sql DIR "INSERT INTO store VALUES ('c64', 'atari', 1999)"
+error: key 'c64' already exists
+
+$ sql DIR "SELECT * WHERE key = 'c64'"
+plan:
+  Get 'c64' (get: one lookup)
+ key | maker     | year
+-----+-----------+------
+ c64 | commodore | 1982
+(1 row)
+rows visited: 1
+
+$ sql DIR "INSERT INTO store VALUES ('amiga', 'commodore', 'nineteen eighty-five')"
+error: year must be an integer; 'nineteen eighty-five' isn't
+
+$ sql DIR "INSERT INTO store VALUES ('amiga', 'commodore')"
+error: store has 3 fields (key, maker, year); got 2 values
+
+$ sql DIR "SELECT price"
+error: no field named price
+
+$ sql DIR "SELECT * WHERE year = '1982'"
+error: year must be an integer; '1982' isn't
+
+$ sql DIR "INSERT INTO store VALUES ('amiga', 'commodore', 1985)"
+inserted 1 row
+
+$ sql DIR "SELECT DISTINCT maker"
+plan:
+  Distinct
+    Project maker
+      FullScan (fold: every row)
+ maker
+-----------
+ commodore
+ sinclair
+ ibm
+ apple
+ acorn
+(5 rows)
+rows visited: 6
+
+$ insert-race DIR
+1000 keys, 8 threads
+                 ok   keys twice+  rows lost
+get then put   4631           887       3631
+batch          1000             0          0
+
+$ time-where DIR
+1000000 rows; each time is the median of 5 runs
+SELECT * WHERE key = 'key-0500000': 1 rows returned, 1 visited, 1.772µs
+SELECT * WHERE year = 1982: 33333 rows returned, 1000000 visited, 1.328899946s

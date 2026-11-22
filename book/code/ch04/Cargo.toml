@@ -1,0 +1,19 @@
+[package]
+name = "attributes"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not a member of the yabiir workspace: book programs build on their own.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sql"
+path = "src/main.rs"
+
+[dependencies]
+yabiir = { path = "../../../crates/yabiir" }
+yabiir-sql = { path = "../../../crates/yabiir-sql" }

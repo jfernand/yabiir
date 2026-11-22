@@ -31,11 +31,15 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Token {
+pub(crate) enum Token {
     /// A keyword or a field name, upper-cased.
     Word(String),
     Star,
     Equals,
+    LeftParen,
+    RightParen,
+    Comma,
+    Integer(i64),
     String(Vec<u8>),
     End,
 }
@@ -46,6 +50,10 @@ impl fmt::Display for Token {
             Token::Word(w) => write!(f, "{w}"),
             Token::Star => f.write_str("'*'"),
             Token::Equals => f.write_str("'='"),
+            Token::LeftParen => f.write_str("'('"),
+            Token::RightParen => f.write_str("')'"),
+            Token::Comma => f.write_str("','"),
+            Token::Integer(n) => write!(f, "{n}"),
             Token::String(_) => f.write_str("a string"),
             Token::End => f.write_str("the end of the query"),
         }
@@ -53,7 +61,7 @@ impl fmt::Display for Token {
 }
 
 /// The text cut into tokens, each with the offset it starts at.
-fn tokenize(text: &str) -> Result<Vec<(usize, Token)>, ParseError> {
+pub(crate) fn tokenize(text: &str) -> Result<Vec<(usize, Token)>, ParseError> {
     let bytes = text.as_bytes();
     let mut tokens = Vec::new();
     let mut i = 0;
@@ -68,6 +76,35 @@ fn tokenize(text: &str) -> Result<Vec<(usize, Token)>, ParseError> {
             b'=' => {
                 tokens.push((start, Token::Equals));
                 i += 1;
+            }
+            b @ (b'(' | b')' | b',') => {
+                tokens.push((
+                    start,
+                    match b {
+                        b'(' => Token::LeftParen,
+                        b')' => Token::RightParen,
+                        _ => Token::Comma,
+                    },
+                ));
+                i += 1;
+            }
+            b if b.is_ascii_digit()
+                || (b == b'-'
+                    && bytes
+                        .get(i + 1)
+                        .is_some_and(u8::is_ascii_digit)) =>
+            {
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let n = text[start..i]
+                    .parse()
+                    .map_err(|_| ParseError {
+                        at: start,
+                        message: "integer doesn't fit in 64 bits".into(),
+                    })?;
+                tokens.push((start, Token::Integer(n)));
             }
             b'\'' => {
                 let mut value = Vec::new();
@@ -118,17 +155,17 @@ fn tokenize(text: &str) -> Result<Vec<(usize, Token)>, ParseError> {
     Ok(tokens)
 }
 
-struct Parser {
-    tokens: Vec<(usize, Token)>,
-    next: usize,
+pub(crate) struct Parser {
+    pub(crate) tokens: Vec<(usize, Token)>,
+    pub(crate) next: usize,
 }
 
 impl Parser {
-    fn peek(&self) -> &Token {
+    pub(crate) fn peek(&self) -> &Token {
         &self.tokens[self.next].1
     }
 
-    fn advance(&mut self) -> Token {
+    pub(crate) fn advance(&mut self) -> Token {
         let token = self.tokens[self.next]
             .1
             .clone();
@@ -138,7 +175,7 @@ impl Parser {
         token
     }
 
-    fn error(&self, expected: &str) -> ParseError {
+    pub(crate) fn error(&self, expected: &str) -> ParseError {
         let (at, found) = &self.tokens[self.next];
         ParseError {
             at: *at,
@@ -146,11 +183,11 @@ impl Parser {
         }
     }
 
-    fn is_word(&self, word: &str) -> bool {
+    pub(crate) fn is_word(&self, word: &str) -> bool {
         matches!(self.peek(), Token::Word(w) if w == word)
     }
 
-    fn expect_word(&mut self, word: &str) -> Result<(), ParseError> {
+    pub(crate) fn expect_word(&mut self, word: &str) -> Result<(), ParseError> {
         if self.is_word(word) {
             self.advance();
             Ok(())

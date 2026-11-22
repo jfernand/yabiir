@@ -245,7 +245,8 @@ so it's outside the range.
 
 That's the step between `SELECT DISTINCT value` and the `fold`: the parser makes a tree of what the
 query says, the planner makes a plan of how to answer it, and the executor runs the plan, calling
-`fold`, `get` or `scan` at the leaves. @ch-secondary needs a plan with more than one leaf.
+`fold`, `get` or `scan` at the leaves. @ch-attributes gives the value fields of its own, and the
+first statement that writes.
 
 #takeaways(
   [A query goes from text to a tree (parsing), from the tree to a plan (planning), and from the plan

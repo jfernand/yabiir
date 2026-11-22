@@ -16,7 +16,18 @@ Open decisions are marked **Decision:**.
 
 ---
 
-## Part 1 — The relational algebra, in the order the book meets it
+## The sequence: reads and writes, woven
+
+*(Author's decision, 2026-11-21.)* There's no separate DML part. Each command arrives with the new
+thing its implementation needs, next to the query that needs it: `INSERT` with attributes and domains,
+`DELETE` and `UPDATE` once rows have fields, `INSERT … SELECT` with the second table, foreign keys with
+the join. Step numbers are stable names (D1–D5 were the old DML part); the order below is the order of
+the book.
+
+Codd's rule for writes is the same as for reads: they're *set-at-a-time* — insert, update and delete
+operate on relations, not on one record at a time (Rule 7 of his 1985 twelve rules, "high-level
+insert, update, and delete"). The sequence starts one record at a time anyway, because that's what
+the engine does, and reaches the set-at-a-time form at D2 and D4.
 
 ### 1. π — Projection *(Chapter 0, done)*
 
@@ -69,6 +80,38 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 - **yabiir needs:** a value encoding — a codec in a layer above the engine; the engine is unchanged.
   This is the "turn the value into a record" question, answered at the point the book needs it.
 - σ on a non-key attribute is a full `fold` again. That's deliberate: it sets up step 10.
+- **Status:** Chapter 4, *Attributes and INSERT*, drafted (2026-11-21), with D1. `yabiir-sql`'s `table`
+  module has the schema, the codec, the parser, the planner and `INSERT`; the schema is given by the
+  program, and a catalog waits for a second table.
+
+### D1. `INSERT` — one tuple
+
+- `INSERT INTO computers VALUES ('amiga', 'commodore', 1985)`.
+- **The point:** `INSERT` and `put` are not the same. `put` overwrites; `INSERT` must *fail* if the key
+  exists — the primary key is the identity of the tuple, and a relation can't hold two with the same
+  key (*entity integrity*, Codd).
+- **yabiir needs:** an insert-if-absent. yabiir 0.9 has it: a `write_batch` of
+  `Op::Check { cond: Cond::Absent }` and the `Op::Put`. The book shows first why `get` then `put`
+  races, then the batch that doesn't.
+- **Status:** in Chapter 4, because a row with attributes needs something that writes it. The race is
+  measured (`book/code/ch04/src/bin/insert-race.rs`).
+
+### D2. `DELETE` — by key, then by condition
+
+- `DELETE FROM computers WHERE key = 'c64'` → one tombstone.
+- `DELETE FROM computers WHERE year < 1980` → σ, then one tombstone per match: the first
+  set-at-a-time write.
+- **yabiir needs:** `delete`. Where the space goes is `merge` — a natural place for it.
+
+### D3. `UPDATE` — non-key attributes, then the key
+
+- `UPDATE computers SET price = 299 WHERE key = 'c64'` → read, modify, append a new version.
+- On an append-only store, every update is a new record and the old one is garbage until `merge`.
+- Updating the **key** is a delete plus an insert, and the book says so: the key is the identity.
+- **The race:** two concurrent read-modify-writes lose one update. The fix is a compare-and-put:
+  read with `get_versioned`, write a batch with `Cond::Version(v)` on the key, retry if the check
+  fails (yabiir 0.9). It's the smallest transaction-shaped thing the book needs; multi-statement
+  transactions are out of this plan's scope.
 
 ### 5. ∪ ∩ − — Union, intersection, difference
 
@@ -79,6 +122,22 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 - **yabiir needs:** two ordered scans, merged in one pass: union, intersection and difference of two
   sorted key streams are three variations of the same merge loop.
 - **Note:** `UNION` is the set operator. `UNION ALL` is SQL's bag version, and out of scope.
+
+### D4. Set-at-a-time `INSERT … SELECT`
+
+- `INSERT INTO classics SELECT … FROM computers WHERE year < 1983` — relational assignment: the
+  result of a query, inserted as a relation. Closes the loop back to Part 1.
+
+### 10. Secondary indices
+
+Not an operator: the fix for step 4's slow σ on non-key attributes.
+
+- **yabiir needs:** an index table per indexed attribute, maintained on every write — in the same
+  `write_batch` as the record (0.9), so a crash can't separate them.
+- **Status:** Chapter 4 states the costs and, since 0.9, the atomic batch and version check that keep
+  an index consistent; the index layer itself isn't built.
+- **Placement:** after D2, D3 and tables: an index is one more table, and it has to be maintained on
+  insert, update and delete. Its draft is Chapter 5 for now, and moves when those chapters exist.
 
 ### 6. × — Cartesian product, and ρ — rename
 
@@ -98,6 +157,15 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 - **yabiir needs:** nothing new: an index nested-loop join is a `fold` over one side and a `get` on the
   other; a merge join is two ordered scans. The book measures both against step 6's product.
 
+### D5. Integrity constraints — foreign keys
+
+- **Domains** (step 4) and the **primary key** (D1) are enforced from Chapter 4, where they arrive; `UPDATE`
+  checks domains too (D3).
+- **Foreign keys** (*referential integrity*, Codd): `computers.maker` must name a key of `makers`;
+  inserting an unknown maker, or deleting a maker that's still referenced, fails.
+- **Decision:** without `NULL`, a foreign key can't be "unknown", so every tuple must reference
+  something real. That's the Codd-without-nulls position, and it's the consistent one for this book.
+
 ### 8. ÷ — Division
 
 - **What:** the "for all" query: the makers that sold a computer in *every* year of a given set.
@@ -113,69 +181,6 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 - **Why here:** SQL's `SELECT … FROM … WHERE` reads like the calculus and runs like the algebra. Once
   the reader has built every operator, this chapter shows the translation from one to the other —
   which is what a query planner does.
-
-### 10. Secondary indices
-
-Not an operator: the fix for step 4's slow σ on non-key attributes.
-
-- **yabiir needs:** an index table per indexed attribute, maintained on every write — in the same
-  `write_batch` as the record (0.9), so a crash can't separate them.
-- **Status:** Chapter 4 states the costs and, since 0.9, the atomic batch and version check that keep
-  an index consistent; the index layer itself isn't built.
-- **Old material:** the current Chapter 3 belongs here, after DML has introduced writes (it needs
-  them: an index has to be maintained on insert, update and delete).
-- **Decision:** before or after Part 2. Before is shorter; after lets index maintenance use the DML
-  vocabulary. I'd put it after D3.
-
----
-
-## Part 2 — The basics of DML
-
-Codd's rule for writes is the same as for reads: they're *set-at-a-time* — insert, update and delete
-operate on relations, not on one record at a time (Rule 7 of his 1985 twelve rules, "high-level
-insert, update, and delete"). The sequence starts one record at a time anyway, because that's what
-the engine does, and ends at the set-at-a-time form.
-
-### D1. `INSERT` — one tuple
-
-- `INSERT INTO computers VALUES ('amiga', 'commodore', 1985)`.
-- **The point:** `INSERT` and `put` are not the same. `put` overwrites; `INSERT` must *fail* if the key
-  exists — the primary key is the identity of the tuple, and a relation can't hold two with the same
-  key (*entity integrity*, Codd).
-- **yabiir needs:** an insert-if-absent. yabiir 0.9 has it: a `write_batch` of
-  `Op::Check { cond: Cond::Absent }` and the `Op::Put`. The book shows first why `get` then `put`
-  races, then the batch that doesn't.
-
-### D2. `DELETE` — by key, then by condition
-
-- `DELETE FROM computers WHERE key = 'c64'` → one tombstone.
-- `DELETE FROM computers WHERE year < 1980` → σ, then one tombstone per match: the first
-  set-at-a-time write.
-- **yabiir needs:** `delete`. Where the space goes is `merge` — a natural place for it.
-
-### D3. `UPDATE` — non-key attributes, then the key
-
-- `UPDATE computers SET price = 299 WHERE key = 'c64'` → read, modify, append a new version.
-- On an append-only store, every update is a new record and the old one is garbage until `merge`.
-- Updating the **key** is a delete plus an insert, and the book says so: the key is the identity.
-- **The race:** two concurrent read-modify-writes lose one update. The fix is a compare-and-put:
-  read with `get_versioned`, write a batch with `Cond::Version(v)` on the key, retry if the check
-  fails (yabiir 0.9). It's the smallest transaction-shaped thing the book needs; multi-statement
-  transactions are out of this plan's scope.
-
-### D4. Set-at-a-time `INSERT … SELECT`
-
-- `INSERT INTO classics SELECT … FROM computers WHERE year < 1983` — relational assignment: the
-  result of a query, inserted as a relation. Closes the loop back to Part 1.
-
-### D5. Integrity constraints
-
-- **Domains** (from step 4): a value outside its attribute's domain is rejected on `INSERT`/`UPDATE`.
-- **Primary key:** already enforced since D1.
-- **Foreign keys** (*referential integrity*, Codd): `computers.maker` must name a key of `makers`;
-  inserting an unknown maker, or deleting a maker that's still referenced, fails.
-- **Decision:** without `NULL`, a foreign key can't be "unknown", so every tuple must reference
-  something real. That's the Codd-without-nulls position, and it's the consistent one for this book.
 
 ---
 
@@ -206,9 +211,9 @@ an extension, with grouping defined over sets so it doesn't smuggle bags back in
 | 3 | `WHERE key BETWEEN …` (σ) | ordered keydir, `scan` |
 | 3a | text → tree → plan | `yabiir-sql` crate: parser, AST, planner, executor; `Engine::key_order` |
 | 4 | attributes in values | value codec (layer above the engine) |
-| 5 | `UNION` / `INTERSECT` / `EXCEPT` | tables (key prefix); merge of two scans |
-| 6–8 | ×, ⋈, ÷ | nothing new |
-| 10 | faster σ on attributes | index tables, maintained in one `write_batch` with the record (0.9) |
 | D1 | `INSERT` | `put`; insert-if-absent as `write_batch` with `Cond::Absent` (0.9) |
 | D2 | `DELETE` | `delete` |
 | D3 | `UPDATE` | read-modify-write: `get_versioned`, then `write_batch` with `Cond::Version` (0.9) |
+| 5 | `UNION` / `INTERSECT` / `EXCEPT` | tables (key prefix); merge of two scans |
+| 10 | faster σ on attributes | index tables, maintained in one `write_batch` with the record (0.9) |
+| 6–8 | ×, ⋈, ÷ | nothing new |

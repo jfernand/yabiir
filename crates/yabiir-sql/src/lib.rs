@@ -8,10 +8,14 @@
 //! ```
 //!
 //! There is one table, the store, so there is no `FROM`.
+//!
+//! [`table`] is the same pipeline for a store whose values have attributes,
+//! with `INSERT`.
 
 mod ast;
 mod parse;
 mod plan;
+pub mod table;
 
 use std::fmt;
 

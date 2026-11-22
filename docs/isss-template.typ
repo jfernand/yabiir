@@ -189,6 +189,7 @@
   title: "",
   subtitle: "",
   author: "",
+  credit: none,
   contact: "",
   date: "",
   docid: "",
@@ -318,8 +319,8 @@
     #grid(
       columns: (1fr, 1fr, 1fr),
       column-gutter: 10pt,
-      [#label-sm(fill: c-steel-500)[Author] \ #v(2pt)
-       #text(size: 9pt, fill: c-paper, weight: 500)[#author]],
+      [#label-sm(fill: c-steel-500)[#if credit != none [Credit] else [Author]] \ #v(2pt)
+       #text(size: 9pt, fill: c-paper, weight: 500)[#if credit != none { credit } else { author }]],
       [#label-sm(fill: c-steel-500)[Contact] \ #v(2pt)
        #text(font: font-mono, size: 8pt, fill: c-paper)[#contact]],
       [#label-sm(fill: c-steel-500)[Issued] \ #v(2pt)

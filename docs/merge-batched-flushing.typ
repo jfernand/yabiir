@@ -3,7 +3,8 @@
 #show: isss-doc.with(
   title: "Batched Merge Flushing",
   subtitle: "Removing Per-Entry Flush Overhead From yabiir's Compaction Path",
-  author: "Javier Fernández",
+  author: "Javier Fernandez",
+  credit: "JAVIER FERNANDEZ, EDITOR",
   contact: "jfernand@me.com",
   date: "2026-09-16",
   docid: "ISSS-TR-0501",

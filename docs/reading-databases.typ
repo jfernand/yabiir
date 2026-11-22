@@ -14,13 +14,14 @@
 #show: isss-doc.with(
   title: "Reading Databases",
   subtitle: "DynamoDB and LMDB, Read Closely for a Bitcask and a Book About Databases",
-  author: "Javier Fernández",
+  author: "Javier Fernandez",
+  credit: "JAVIER FERNANDEZ, EDITOR",
   contact: "jfernand@me.com",
   date: "2026-11-12",
   docid: "ISSS-TR-0505",
   running: "Reading Databases — Part I: DynamoDB · Part II: LMDB",
   abstract: [
-    _Append Only_ has reached the edge of its first part. Chapter 3 turns a query like
+    _Append Only_ builds a database one relational step at a time. Its Chapter 3 turns a query like
     `SELECT * WHERE key BETWEEN 'a' AND 'c'` into a plan over a sorted keydir, and the next step, in every
     textbook, is tables with many columns: DDL, a catalog, migrations, and a secondary index per
     question anyone might ask. This report reads the 2022 USENIX ATC paper on Amazon DynamoDB
@@ -37,10 +38,11 @@
     copy-on-write B+tree in a memory map, no cache and no log. It reads the 2011 paper that
     introduced it with the material on lmdb.tech, tests its claims against two independent
     studies (it is _nearly_ crash-proof, and mmap is right for the workload it chose), and draws
-    what it means for yabiir: snapshots, the batch record as a transaction, measuring merge, and
-    keeping `pread`.
+    what it means for yabiir: snapshots, the batch record as a transaction (built in yabiir
+    0.9), measuring merge, and keeping `pread`.
   ],
   meta: (
+    ("Revised", [2026-11-21, for yabiir 0.9.1. First written 2026-11-12 against 0.6.0.]),
     ("Part I", [Elhemali et al., _Amazon DynamoDB: A Scalable, Predictably Performant, and Fully
       Managed NoSQL Database Service_, USENIX ATC 2022, pp. 1037–1048]),
     ("Part II", [Chu, _MDB: A Memory-Mapped Database and Backend for OpenLDAP_, LDAPCon 2011, with
@@ -49,7 +51,7 @@
       §2 and §5 only) · Bitcask (Basho 2010)]),
     ("Purpose", [Decide what _Append Only_ builds after Chapter 3, and what it can skip]),
     ("Copies", [#cd[refs/] — every paper cited here, as PDF]),
-    ("Related", [_Append Only_ chapters 2–4 · ISSS-TR-0503 (email-mcp on yabiir and a table layer)]),
+    ("Related", [_Append Only_ chapters 2 and 3 · ISSS-TR-0503 (email-mcp on yabiir and a table layer)]),
   ),
 )
 
@@ -68,7 +70,8 @@ are indices the planner has to choose among them, so it needs statistics and a c
 
 That road is long and most of it is machinery. The question behind this report is whether there
 is a shorter road that is still honest: one that ends at a store real applications could use,
-without taking the detour through general-purpose DDL. The plan on the table is:
+without taking the detour through general-purpose DDL. The plan on the table when this report
+was first written was:
 
 - *the schema is given when the store is opened*, as code, not stored as data and changed by
   statements;
@@ -206,26 +209,27 @@ sort order makes ranges cheap within one partition key, and only there.
 
 #dtable(
   columns: (auto, 1fr, 1fr),
-  ([DynamoDB], [yabiir today (0.6.0)], [What the book would need]),
+  ([DynamoDB], [yabiir today (0.9.1)], [What the book would need]),
   ([item, attributes], [one value, opaque bytes], [a self-describing value: named attributes]),
   ([partition key, hashed], [the key, in a hashed keydir (`KeyOrder::Hashed`)], [the first
     part of a composite key]),
   ([sort key, ordered], [the key, in a sorted keydir (`KeyOrder::Sorted`)], [the rest of the
     composite key, encoded to sort correctly]),
   ([`GetItem`], [`get`], [—]),
-  ([`PutItem`, `DeleteItem`], [`put`, `delete`], [a condition: "only if absent", "only if
-    present"]),
-  ([`Query`: one partition key, a sort-key range], [`scan(start, end)`, forward only],
-    [a prefix range, either direction, with a limit]),
+  ([`PutItem`, `DeleteItem`], [`put`, `delete`; conditions with `write_batch` and `Op::Check`
+    (`Cond::Absent`, `Exists`, `Version`)], [—]),
+  ([`Query`: one partition key, a sort-key range], [`scan(start, end)`; `scan_page`, either
+    direction, with a limit and versions], [a prefix range over composite keys]),
   ([`Scan`], [`fold`], [—]),
-  ([secondary index], [none], [another key written with the item, atomically]),
-  ([transactions], [none: one record per write], [an atomic batch of records]),
+  ([secondary index], [none], [another key written with the item, in one `write_batch`]),
+  ([transactions], [`write_batch`: one record, all or nothing, with conditions], [—]),
 )
 
 The table's last column is the subject of §14. Two things stand out before going on. yabiir
 already has both halves of DynamoDB's key, but as a choice made at open time between them rather
-than one composite key. And the gap between yabiir and DynamoDB's data model is three pieces of
-engineering, not a new architecture: composite keys, self-describing values and atomic batches.
+than one composite key. And the gap between yabiir and DynamoDB's data model is engineering, not a
+new architecture. It was three pieces: composite keys, self-describing values and atomic batches.
+Version 0.9 built the atomic batches. The other two are not in the engine.
 
 #callout(kind: "info", "What §3 doesn't say")[
   The paper never describes `Query`, the operation that reads a range of sort keys within one
@@ -288,7 +292,8 @@ global secondary indices and transactions are separate services that the figure 
   None of the distributed machinery applies to a single node. The rule that does apply is the
   shape of the write path: *a write is done when its log record is durable*, and every other
   structure is derived from the log. That is already yabiir's design, and `sync_on_put` with group
-  commit (ISSS-TR-0502) is its single-node version of "a quorum has persisted the record."
+  commit (ISSS-TR-0502), which the writer thread now does by writing each queue of batches with
+  one fsync, is its single-node version of "a quorum has persisted the record."
 ]
 
 = From provisioned to on-demand: a lesson about skew <sec-capacity>
@@ -372,7 +377,7 @@ The system predicts it, from the table's own history.
   distribution (Zipfian, the YCSB default) would be a better default for the measurements the
   book prints. Second, the observation that sequential key access defeats range splitting is the
   same observation that will make the email program's "newest twenty" a reverse range scan, which
-  yabiir doesn't yet have.
+  yabiir has had since 0.9 as `scan_page`.
 ]
 
 = Durability and correctness <sec-durability>
@@ -425,7 +430,7 @@ the closest snapshot and applies the log up to the requested timestamp. Backups 
 across partitions "up to the nearest second."
 
 #callout(kind: "ok", "For yabiir — the section that maps most directly")[
-  yabiir already has the parts DynamoDB built this on. Every data-file entry has a CRC32 over its
+  yabiir already has the parts DynamoDB built this on. Every data-file record has a CRC32 over its
   header and payload. Hint files have a whole-file CRC32, and a bad one falls back to scanning the
   data file. Opening a store rebuilds the keydir from the log. Three things follow:
 
@@ -433,13 +438,13 @@ across partitions "up to the nearest second."
     the data files alone (no hint files) and compare it entry by entry with the live one. It's a
     small feature with DynamoDB's own argument behind it: it tests the hint-file path and the
     merge path against the simplest possible reconstruction.
-  - *Point-in-time reads are almost free in a log*, because every entry already carries a
-    timestamp. A keydir rebuilt from entries with `tstamp ≤ t` is the store as of time _t_.
+  - *Point-in-time reads are almost free in a log*, because every record already carries a
+    timestamp. A keydir rebuilt from records with `tstamp ≤ t` is the store as of time _t_.
     The catch is merge: it discards superseded entries, which is exactly the history a
     point-in-time read needs. DynamoDB keeps history by archiving logs before truncating them;
     a Bitcask would have to keep merged-away files, or merge only before a horizon.
-  - *yabiir already has a model test*, which runs random sequences of puts, deletes, reopens and
-    merges against a plain `BTreeMap`.
+  - *yabiir already has a model test*, which runs random sequences of puts, deletes, write batches,
+    reopens and merges against a plain `BTreeMap`.
     That is the lightweight cousin of DynamoDB's TLA+ specification.
 ]
 
@@ -519,7 +524,10 @@ MemDS's load but keeps it constant, whatever the hit rate, so a cold cache chang
   than messages. If every record and every value carries a format version, a new version of the
   engine first learns to read the new format, and only a later version writes it. Old files are
   never rewritten in place. They are rewritten, if at all, by merge, which already copies every
-  live record. That is a migration strategy with no migration step. And note MemDS's `floor`
+  live record. That is a migration strategy with no migration step. Format v2 (0.9) uses its second half: each
+  file names its format in a magic number, version 1 files stay readable, and merge rewrites them
+  as version 2. The first half it skipped: 0.9 learned to read v2 and began writing it in the same
+  release. And note MemDS's `floor`
   lookup: "which partition holds key _k_" is "the greatest boundary ≤ _k_", which a sorted keydir
   answers and a hashed one can't.
 ]
@@ -616,11 +624,12 @@ described. Neither is needed here.
 
 #callout(kind: "ok", "For yabiir")[
   An index written by the store has to be written atomically with the row it indexes, or it can
-  disagree with the table after a crash. yabiir writes one record per `put`, with no batch, so
-  there's nothing to make two records atomic yet. A *batch record*, several puts and deletes in
-  one CRC-covered entry that recovery applies all or none of, is the one piece of storage-engine
-  work the proposal in §14 needs. DynamoDB's one-request transactions are a model for its API:
-  a list of writes, submitted once, with conditions.
+  disagree with the table after a crash. A *batch record*, several puts and deletes in one
+  CRC-covered record that recovery applies all or none of, was the one piece of storage-engine
+  work the proposal in §14 needed, and yabiir 0.9 has it as `Engine::write_batch`. Its API follows
+  DynamoDB's one-request transactions: a list of writes, submitted once, with conditions
+  (`Op::Check` with `Cond::Absent`, `Exists` or `Version`). The index layer that would use it
+  isn't built.
 ]
 
 = Spanner, for the other side <sec-spanner>
@@ -685,7 +694,7 @@ Put the papers side by side and three claims appear in all of them.
 
 / The ordered primary key is the main index: DynamoDB stores items by (hash of partition key,
   sort key). Spanner requires an ordered primary key and stores tables interleaved by it. Bitcask
-  has one index, the keydir, and yabiir 0.6.0 can keep it sorted. In each case, the efficient
+  has one index, the keydir, and yabiir 0.9.1 can keep it sorted. In each case, the efficient
   reads are lookups and ranges over the key, and everything else is a scan.
 
 / The schema is only the key: DynamoDB fixes the key schema at creation and nothing else. The
@@ -769,7 +778,7 @@ ranges, prefixes, order and limits. Four uses come up again and again.
 
 All of this depends on the sort key's *byte order* being the order the application means. Numbers
 are zero-padded or encoded big-endian, dates are written ISO 8601, and separators are chosen to
-sort before every character a component can contain. It's the same problem §14's Chapter 5 solves
+sort before every character a component can contain. It's the same problem §14's composite keys solve
 with the tuple encoding, solved by hand in strings.
 
 == Item collections: the join that's already done
@@ -821,7 +830,7 @@ attributes, which is SimpleDB's lesson, paid in write units.
 
 == A worked example: the email program
 
-Here is the email program of _Append Only_'s chapters 2 and 4, designed this way. IMAP gives every
+Here is the email program of _Append Only_'s Chapter 2, designed this way. IMAP gives every
 message in a mailbox a UID that only grows, so UID order is arrival order, and the UID can be the
 sort key.
 
@@ -848,8 +857,8 @@ key until one mailbox gets thousands of messages a second.
 
 #callout(kind: "ok", "For yabiir")[
   Every row of that table is a lookup or a prefix range over a sorted key, and that's all a
-  sorted keydir needs to provide, once keys are tuples. The type prefixes are §14's Chapter 6.
-  The indices are §14's Chapter 7, and the overloading and sparse-index tricks come with it for
+  sorted keydir needs to provide, once keys are tuples. The type prefixes are §14's single keyspace.
+  The indices are §14's index rows, and the overloading and sparse-index tricks come with it for
   free: an index entry is a row the application, or the store, chooses to write. Whether a
   single-node book needs the partition-key half of this at all is §15's second question. The
   hot-key half doesn't apply: one node has no partitions to overload.
@@ -953,24 +962,31 @@ how the application keeps its side of the deal.
 
 = A line for the book <sec-proposal>
 
-This section is a proposal, not a description of code. Nothing in it exists in yabiir yet, and
-every name in it is a placeholder.
+This section is a proposal, not a description of code. It was written against yabiir 0.6.0. The
+engine has since gained the conditional writes, atomic batches and reverse scans it asks for (0.9).
+The rest is not in the engine, and every name in its sketches is a placeholder.
+
+Its headings are this report's order, not the book's chapters. The book follows its own plan
+(`book/PLAN.md`), one relational operator or piece of DML at a time, with writes woven into the
+relational chapters. That plan differs from this proposal in places: it brings in tables and
+`FROM` for the set operators, and leaves `ORDER BY` and `LIMIT` out of scope.
 
 The constraints were: the schema is given at open time, queries are trees, and migrations are out
 of scope. The papers above add one more, and a direction. The constraint: _indices are few and
 explicit_. The direction: _build up to DynamoDB's data model on one node, then stop_, or carry on
 into partitioning and replication in a later part.
 
-== Chapter 4: writes
+== Writes
 
-Chapter 3 reads. The next chapter writes: `INSERT`, `DELETE`, and their conditions. An `INSERT`
-that fails when the key exists is `put` with the condition "absent". A `DELETE` that reports
-whether it deleted anything is `delete` with the condition "present". These are DynamoDB's
-condition expressions in their smallest form, and they need a read and a write under one lock.
-yabiir already serialises appends under one, so the check can go inside it. The tree grows a second statement, and the planner learns that a
+Chapter 3 reads. The next step writes: `INSERT`, `DELETE`, and their conditions. An `INSERT`
+that fails when the key exists is a `write_batch` of `Op::Check` with `Cond::Absent` and an
+`Op::Put`. A `DELETE` that reports whether it deleted anything is the same batch with
+`Cond::Exists` and an `Op::Delete`. These are DynamoDB's condition expressions in their smallest
+form, and they need a read and a write with nothing between them. yabiir's writer thread checks
+each batch's conditions and appends it, so the engine side exists. The tree grows a second statement, and the planner learns that a
 write has a plan too: a condition check and an append.
 
-== Chapter 5: composite keys
+== Composite keys
 
 The key becomes a tuple, and *the schema is the tuple's shape*, given as code when the store is
 opened:
@@ -1013,11 +1029,11 @@ data hashed, and the planner has to answer a prefix condition with a `fold` and 
 sorted, and the planner walks one range. The cost difference is Chapter 2's B-tree footnote, now
 measured on a query someone would really make.
 
-The engine work is a reverse scan with a limit: `scan` today is forward-only and returns a `Vec`.
-The email program's "newest twenty in INBOX" is a prefix `("INBOX")`, descending, limit 20, which
+The engine work was a reverse scan with a limit, and 0.9 added it: `scan_page` reads a page of a
+range in either direction. The email program's "newest twenty in INBOX" is a prefix `("INBOX")`, descending, limit 20, which
 reads twenty entries however large the mailbox is.
 
-== Chapter 6: one keyspace, several kinds of record
+== One keyspace, several kinds of record
 
 A store with one key schema can still hold several kinds of record, if the first part of the key
 says which kind. A mailbox and its messages can share a prefix, so one range returns both:
@@ -1042,16 +1058,16 @@ only the key has a schema, adding an attribute needs no migration, and old recor
 That gives the book Appendix A's subject, the missing value, from a direction readers will
 recognise.
 
-== Chapter 7: an index is a row you write too
+== An index is a row you write too
 
-Chapter 4 in today's book is "Secondary Indices," and this is where it belongs: after composite
-keys, as a short chapter. An index on a message's sender is another record, with key
+The book has a chapter on "Secondary Indices," and this proposal puts it here: after composite
+keys, and short. An index on a message's sender is another record, with key
 `("by-sender", sender, received, uid)` and the message's primary key as its value, written with
 every write of the message. The chapter has three things to teach, each from the papers:
 
 - *Atomicity.* The message and its index entry are written together or not at all. That needs the
-  batch record of §9, and it is the one real storage-engine change in the proposal. Its API is
-  DynamoDB's: a list of writes with conditions, submitted once.
+  batch record of §9, the one real storage-engine change in the proposal, which 0.9 made as
+  `write_batch`. Its API is DynamoDB's: a list of writes with conditions, submitted once.
 - *Cost.* Every index adds a write to every write, which yabiir's benchmarks can measure:
   throughput with zero, one and three indices. That's SimpleDB's lesson, measured on the reader's
   own machine.
@@ -1060,12 +1076,12 @@ every write of the message. The chapter has three things to teach, each from the
   as Chapter 3's planner does. The cost-based planner stays in the "Rules and costs" box, where it
   is today.
 
-== Chapter 8: the log is the truth
+== The log is the truth
 
-The last chapter of the part comes back to the title. *Verify* rebuilds a keydir from the data
+The last step comes back to the title. *Verify* rebuilds a keydir from the data
 files alone and compares it with the live one: DynamoDB's scrub, on one node. *Reading as of a
-time* rebuilds a keydir from the entries written up to that time: point-in-time restore. And the
-chapter ends on the tension the reconstruction exposes: merge is what makes a Bitcask small, and
+time* rebuilds a keydir from the entries written up to that time: point-in-time restore. And it
+ends on the tension the reconstruction exposes: merge is what makes a Bitcask small, and
 merge is what throws its history away.
 
 == What the line skips, on purpose
@@ -1075,8 +1091,8 @@ merge is what throws its history away.
   ([Skipped], [Why the papers allow it]),
   ([DDL and a catalog], [The schema is code at open time. DynamoDB's only "DDL" is a key schema at
     creation, and it can't be altered.]),
-  ([Migrations], [Only the key has a schema, and values describe themselves. Format changes use
-    DynamoDB's read-then-write deployment, with merge as the rewrite.]),
+  ([Migrations], [Only the key has a schema, and values describe themselves. Format changes keep
+    old files readable and use merge as the rewrite, as format v2 does.]),
   ([General secondary indices], [A few explicit indices, as rows. Spanner shipped without
     automatic ones, and F1 built its own.]),
   ([Joins], [Interleaved keys answer the common case, parent with children, as one range.]),
@@ -1104,9 +1120,10 @@ the book, or a second book, and this report doesn't decide which.
   part and sorts the rest. A single-node store has no reason to hash for spreading load, so it
   could simply sort the whole tuple. Keeping a hashed option preserves Chapter 1's argument and
   costs a code path.
-+ *Where does the batch record go in the format?* As a new entry type with a flag bit, as the
-  tombstone flag is, it changes the data-file format. That makes it the first test of
-  read-before-write format versioning, which is a chapter's worth of material in itself.
++ *Where does the batch record go in the format?* Format v2 (0.9) answers it. A record holds one
+  or more operations under one CRC and one sequence number, and each file starts with a header
+  naming its format. Version 1 files stay readable, and merge rewrites them as version 2. Whether
+  that versioning is a chapter's worth of material for the book is still open.
 + *How skewed should the book's benchmarks be?* Uniform keys flatter every design. A Zipfian
   default would match YCSB, and §4 of the paper.
 
@@ -1135,14 +1152,15 @@ It belongs in this report for three reasons.
   memory, rebuilt on every open, and the whole keydir has to fit in RAM. That's Bitcask's one hard
   limit. LMDB's B+tree is the index _and_ the data, on disk, and is ready the moment the file is
   mapped.
-- *It answers Part I's unfinished questions on one node.* Part I's proposal needs atomic batches,
+- *It answers Part I's questions on one node.* Part I's proposal needs atomic batches,
   several indices updated together, reverse range scans and a format-versioning policy. LMDB has
-  all four, in a design small enough to read in an afternoon.
+  all four, in a design small enough to read in an afternoon. yabiir has since gained the batches,
+  the reverse scans and a format version.
 
 #callout(kind: "info", "Sources")[
   The main text is the LDAPCon 2011 paper that introduced the library, then called MDB
   @chu2011mdb, with its 2012 expansion for LinuxCon, _Life After BerkeleyDB_ @chu2012lifeafter.
-  Around them are Chu's HPTS position paper @chu2015hpts, his 2015 SDC slides @chu2015sdc, the
+  Around them are Chu's HPTS position paper @chu2015hpts, his slides of September 2015 @chu2015sdc, the
   LMDB 1.0 documentation and benchmark pages on lmdb.tech @lmdb-doc @lmdb-microbench
   @lmdb-ondisk, and two independent papers: the OSDI 2014 crash-consistency study that Chu cites
   @pillai2014, and the CIDR 2022 case against mmap @crotty2022. Quotations are from the 2011
@@ -1289,10 +1307,10 @@ one sector isn't torn, among the best results in the study. The claim in the sli
 than its sources. The design deserves the reputation; the slide doesn't.
 
 #callout(kind: "ok", "For yabiir")[
-  Bitcask's crash story is the log's. Every entry has a CRC, recovery scans to the last valid one,
-  and a torn tail is cut off. There's no root pointer to tear. LMDB's story is the root's: two
+  Bitcask's crash story is the log's. Every record has a CRC, recovery applies each one whole or
+  skips it, and a torn tail is ignored. There's no root pointer to tear. LMDB's story is the root's: two
   copies of it and a transaction id. Both avoid replaying anything. The difference is where the
-  atomic step is. In yabiir it's "this entry's CRC checks", and in LMDB it's "this meta page is
+  atomic step is. In yabiir it's "this record's CRC checks", and in LMDB it's "this meta page is
   newer". The book could set the two side by side in a chapter on crashes. ALICE itself, which
   records a workload's system calls and replays them in every order the file system allows, is
   a tool yabiir could run.
@@ -1352,8 +1370,8 @@ Neither choice is free. It's a choice between paying all the time (LMDB) and pay
 #callout(kind: "ok", "For yabiir")[
   This is a measurement the book could make, and should. How many bytes does merge write per byte
   of user data, at a given rate of overwrites? How much write throughput is left while a merge
-  runs? yabiir's merge already rewrites files in batches (ISSS-TR-0501), so the numbers exist to
-  be collected. Chu's ">>2N" is an argument, not a measurement, and the book can test it on a
+  runs? yabiir's merge already rewrites files in batches (ISSS-TR-0501), and its metrics count the
+  files compacted and entries copied, but not bytes, so the measurement is still to be made. Chu's ">>2N" is an argument, not a measurement, and the book can test it on a
   real compactor.
 ]
 
@@ -1383,13 +1401,14 @@ Durability is configurable. `MDB_NOSYNC` and `MDB_NOMETASYNC` skip some or all o
 yabiir makes with `sync_on_put`.
 
 #callout(kind: "ok", "For yabiir")[
-  yabiir also has one writer, and since this report was first written it has been made strict:
-  an append and the keydir update that publishes it are one step under the writer's lock
-  (`crates/yabiir/src/writer.rs`), so the keydir changes in the order of the log.
-  What it lacks is the _transaction_ around them. In LMDB, atomicity comes for free from the
-  meta-page swap, because a transaction's pages become visible all at once or not at all. In a
-  log, atomicity has to be written into the log, as the batch record of Part I's §9. The two
-  designs reach the same API (several writes, one commit) by opposite mechanisms.
+  yabiir also has one writer, since 0.9 a thread (`crates/yabiir/src/writer.rs`). It takes the
+  queued batches as a group, checks their conditions, appends each as one record, and publishes
+  the group to the keydir in log order, after the fsync when `sync_on_put` is set. In LMDB,
+  atomicity comes for free from the meta-page swap, because a transaction's pages become visible
+  all at once or not at all. In a log, atomicity has to be written into the log, and yabiir's is
+  the batch record of Part I's §9. The two designs reach the same API (several writes, one commit)
+  by opposite mechanisms. yabiir's batch is one request, as DynamoDB's is: there is no transaction
+  to hold open across calls.
 ]
 
 = A data model in a library <sec-lmdb-model>
@@ -1401,7 +1420,7 @@ way the proposal suggests.
   name, all sharing one transaction. "The back-mdb indexing code uses individual databases for each
   attribute index." Every attribute index is its own tree, and *an entry and all its index entries
   change in one transaction*, atomically, with no extra machinery. It's the "index is a row you
-  write too" of Part I's Chapter 7, except the rows go into separate trees rather than prefixes of
+  write too" of Part I's §14, except the rows go into separate trees rather than prefixes of
   one keyspace.
 
 / Sorted duplicates: with `MDB_DUPSORT`, one key holds a sorted set of values. That's the shape of
@@ -1579,18 +1598,19 @@ meta-page swap almost for free.
   ([Unit], [a partition: 3 replicas], [one file, one process tree], [one directory of logs]),
   ([Structure], [WAL + B-tree per replica], [copy-on-write B+tree, no log], [log only; keydir in
     RAM]),
-  ([Writers], [one leader per partition], [one per file], [one append lock]),
+  ([Writers], [one leader per partition], [one per file], [one writer thread]),
   ([Readers], [any replica, or the leader], [lock-free snapshots], [concurrent, keydir snapshot]),
   ([Atomic unit], [one item; transactions in one request], [a transaction, any size], [one
-    record]),
+    record: a write batch]),
   ([Indices], [few GSIs and LSIs, async or local], [named trees in the same transaction], [none]),
   ([Crash recovery], [replay WAL; log replicas], [none: pick the newer meta page], [scan logs or
-    read hints; cut torn tail]),
+    read hints; skip torn tail]),
   ([Space reclaimed by], [B-tree in place; logs archived], [free list, when no reader is older],
     [merge (compaction)]),
   ([Caches], [constant-work metadata cache], [none: the page cache only], [none: the page cache
     only]),
-  ([Format change], [read first, write later], [dump and load], [—]),
+  ([Format change], [read first, write later], [dump and load], [old files stay readable; merge
+    rewrites them]),
 )
 
 The table shows three things.
@@ -1603,26 +1623,31 @@ The table shows three things.
   being _append only_, and the book's title covers all three.
 - *Atomicity is cheapest where the structure has a single root.* LMDB gets transactions of any
   size from one meta-page write. Bitcask has no root, only a log, so atomicity has to be put into
-  the log as a record that spans several writes. DynamoDB, with no root across partitions, needs a
+  the log as a record that spans several writes, which is yabiir's batch record. DynamoDB, with no root across partitions, needs a
   coordinator and a ledger.
 
 = For yabiir and the book <sec-lmdb-book>
 
-These notes are proposals, in the spirit of Part I's §14.
+These notes are proposals, in the spirit of Part I's §14. One of them, the batch record, has since
+been built.
 
 + *A chapter on crashes, two ways.* Put Bitcask's recovery (CRC, scan, cut the tail) beside
   LMDB's (two meta pages, take the newer), and run both under a crash simulator. Pillai et al.'s
-  result, one 106-byte assumption for LMDB, is the bar.
+  result, one 106-byte assumption for LMDB, is the bar. yabiir has a first piece: a test cuts a
+  batch's record at every byte and checks that a reopen keeps all of it or none
+  (`engine/tests/batches.rs`). The crash simulator and the comparison are open.
 + *Measure merge the way Chu argues about it.* Bytes written per byte of user data, and write
   throughput during a merge, at a range of overwrite rates. That turns ">>2N" from a quotation
-  into a chart.
-+ *Snapshots as an API.* yabiir's `fold` and `scan` already pin a point-in-time snapshot of the
-  keys they visit. LMDB shows the API that grows from that: a read transaction that sees one
-  consistent version across many calls. In a Bitcask that's a pinned keydir snapshot plus pinned
+  into a chart. This is open: the merge metrics count files and entries, not bytes.
++ *Snapshots as an API.* yabiir's `fold`, `scan` and `scan_page` each pin a point-in-time snapshot
+  of the keys they visit. LMDB shows the API that grows from that: a read transaction that sees one
+  consistent version across many calls. yabiir doesn't have one yet. In a Bitcask that's a pinned keydir snapshot plus pinned
   files, which merge has to respect, much as LMDB's free list respects the reader table.
 + *The batch record is the transaction.* Part I's batch record and LMDB's write transaction are
-  the same API. Implementing the first lets the book show the second's semantics without its
-  data structure.
+  the same API, and 0.9 built the first: `write_batch` takes puts, deletes and `Op::Check`
+  conditions, and `get_versioned` with `Cond::Version` makes a compare-and-swap. That lets the book
+  show the second's semantics without its data structure, for a transaction submitted as one
+  request.
 + *A keydir that doesn't fit in memory.* Bitcask's known limit is that every key must fit in RAM.
   LMDB is the standard answer, an on-disk B+tree, and it is also Chapter 2's B-tree made real. A
   later part of the book could build a small copy-on-write B+tree over the same `Bitcask` trait,
@@ -1633,8 +1658,9 @@ These notes are proposals, in the spirit of Part I's §14.
 = Open questions, Part II <sec-lmdb-questions>
 
 + *Is a second engine in scope?* A copy-on-write B+tree is a different book's worth of code. The
-  smaller step is to read LMDB's design in a chapter, and implement only the snapshot API and the
-  batch record in yabiir.
+  smaller step is to read LMDB's design in a chapter, and implement only the snapshot API in
+  yabiir, now that the batch record exists. ROADMAP §6 lists a B-tree variant and leaves open
+  whether it sits on the engine's API or beside it as a second engine.
 + *Should yabiir's read path offer zero copy?* A borrowed-value API (`get_ref`, valid while a read
   snapshot lives) is possible with `pread` into a reusable buffer, without mmap. It would show the
   API cost of zero copy without the risks.

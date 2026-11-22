@@ -3,7 +3,8 @@
 #show: isss-doc.with(
   title: "Group Commit for sync_on_put",
   subtitle: "Sharing fsync Across Concurrent Writers in yabiir",
-  author: "Javier Fernández",
+  author: "Javier Fernandez",
+  credit: "JAVIER FERNANDEZ, EDITOR",
   contact: "jfernand@me.com",
   date: "2026-09-17",
   docid: "ISSS-TR-0502",

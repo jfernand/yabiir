@@ -25,7 +25,7 @@ Sheehy & Smith's 2010 paper (included locally at [`refs/bitcask-intro.pdf`](refs
 - A choice of keydir per open, `Options::key_order`: `KeyOrder::Hashed` (the default, fastest point lookups) or
   `KeyOrder::Sorted`, which adds `Engine::scan(start, end)` for ranges of keys in order, `Engine::scan_page` for a
   page of one either way (with a limit and versions), and makes `fold`/`list_keys` return keys in order. Nothing
-  about it is stored on disk, so a store opens either way. `benches/keydir_order.rs` measures what the order costs
+  about it is stored on disk, so a store opens either way. `crates/yabiir/benches/keydir_order.rs` measures what the order costs
 - A process-level single-writer lock, so two writable (`is_read_write: true`) handles can't corrupt the same directory
 - A small SQL front end over a store, in its own crate (`yabiir-sql`): `SELECT [DISTINCT] * | key | value [WHERE key =
   … | WHERE key BETWEEN … AND …]`, parsed, planned onto `get`/`scan`/`fold`, and executed
@@ -151,7 +151,7 @@ thread replaced it, and gets the same sharing of fsyncs by writing every queued 
 - `scripts/flamegraph.sh` — wraps `cargo flamegraph --profile profiling --bin loadtest` (the `profiling` Cargo profile
   keeps release optimizations but adds debug symbols so frames resolve to real function names).
 - `cargo bench` — Criterion suites for `format`, `keydir`, `keydir_order`, `datafile`, and `merge`, each isolating one
-  layer's cost. Note that `benches/merge.rs` fixes `max_file_size: 1` to control the live/dead entry ratio precisely,
+  layer's cost. Note that `crates/yabiir/benches/merge.rs` fixes `max_file_size: 1` to control the live/dead entry ratio precisely,
   which as a side effect puts every entry in a file of its own (with its fsync) — so it can't isolate the
   flush-batching behavior above; that's covered by unit tests and `loadtest` instead. Its `merge_noop` merges an empty
   store; `merge_active_only` merges 50 keys still in the active file, which since 0.7 is a real merge.

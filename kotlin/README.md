@@ -34,7 +34,7 @@ Engine.open(Path.of("store"), Options(keyOrder = KeyOrder.SORTED)).use { db ->
 | `engine/`, `api.rs`, `error.rs` | `Engine.kt`, `Api.kt`, `Errors.kt` |
 
 The unit tests in `yabiir/src/test` port the Rust crate's tests file by file, as
-`<RustFile>Test.kt`. The proptest models (`tests/model.rs`) became jqwik
+`<RustFile>Test.kt`. The proptest models (`crates/yabiir/tests/model.rs`) became jqwik
 properties in `ModelTest`.
 
 Differences from the Rust crate:

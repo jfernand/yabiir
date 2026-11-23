@@ -45,4 +45,4 @@ come from course and archive mirrors.
 - `codd1989flaws`: Codd, *Fatal Flaws in SQL* (CMG Transactions, 1989). It isn't online.
 - `jayram2006`: Jayram, Kolaitis & Vee, PODS 2006. Only the ACM DL has it.
 - Books (`codd1990`, `date2015sql`, `celko2005`, `jensen1974pascal`, `debrie2020`), the ISO standard (`iso9075`), and web pages cited by URL.
-- `chu2015sdc`: Chu's 2015 SDC slides. They're cited as slides and can be read at the URL in the bib entry.
+- `chu2015sdc`: Chu's LMDB slides, dated 2015-09-21. They're cited as slides and can be read at the URL in the bib entry.

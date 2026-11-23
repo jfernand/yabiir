@@ -21,11 +21,11 @@ crates/yabiir/src/
   lib.rs          // re-exports: Bitcask, Engine, Options, KeyOrder, Error, Metrics
   api.rs          // the Bitcask trait, Options, KeyOrder
   error.rs        // Error, Result
-  format/         // entry.rs, hint.rs: the bytes of an entry and of a hint record
+  batch.rs        // Op, Cond, Commit: write batches and how they end
+  format/         // entry.rs, record.rs, file.rs, hint.rs: the bytes on disk, v1 and v2
   datafile/       // active.rs (append), set.rs (read handles), scan.rs, name.rs, pread.rs
   keydir/         // mod.rs (Keydir: hashed or sorted), shared.rs (behind a lock)
-  writer.rs       // the single writer: append + publish, rotation, sealing for a merge
-  commit.rs       // group commit for sync_on_put
+  writer.rs       // the single writer thread: group commit, publish, rotation, sealing for a merge
   recovery/       // mod.rs, data.rs (scan a data file), hint.rs (replay a hint file)
   merge/          // mod.rs, output.rs, hint.rs, repoints.rs
   engine/         // mod.rs (Engine, open), write.rs, read.rs, tests/
@@ -40,20 +40,20 @@ What differs from the sections that follow:
   gains no files. `ActiveFile` keeps no separate read handle; `DataFileSet` caches one per file, the active file's
   included, and merge removes the handles of the files it removes. Rotation closes the full file; the next write
   creates the next one. Creating or removing a file fsyncs the directory.
-- **§4, the write path.** A put or delete appends and updates the keydir in one critical section under the writer's
-  lock (`writer.rs`), so the keydir changes in log order. Keys over 2³¹ − 1 bytes and values over 2³² − 1 are
-  refused. With `sync_on_put`, concurrent writers share fsyncs (`commit.rs`, `docs/group-commit.typ`). A failed
-  append or fsync closes the active file; the next write starts a new one.
+- **§4, the write path.** Every write is a batch sent to one writer thread (`writer.rs`). It takes whatever is queued
+  as a group, gives the group one `write` (and one fsync, with `sync_on_put`), then publishes it to the keydir in log
+  order. Keys over 2³¹ − 1 bytes and values over 2³² − 1 are refused. A failed `write` or fsync fails the group and
+  ends that file; the next write starts a new one.
 - **§6, recovery.** Data files are scanned through one shared, buffered scanner (`datafile/scan.rs`). A hint file
   that can't be read or fails validation never stops an open; the data file is scanned instead.
 - **§7, merge.** Its input is *every* data file, the active one included: a merge first closes the active file and
-  reserves the ids of its output files, under the writer's lock, so that the output sorts below everything written
+  reserves the ids of its output files, by a command to the writer thread, so that the output sorts below everything written
   after the merge started (§6.4's argument needs id order to be write order). Flushes are batched
   (`docs/merge-batched-flushing.typ`). Output files are created only when there is an entry to write. Input files
   are removed oldest first. Merges are serialized.
-- **§8, locking.** There is no lock on the active file for readers and no separate publish gate: the writer's mutex,
-  the keydir's `RwLock` and the read-handle cache's `RwLock` are all there is, taken in that order. A poisoned lock
-  panics (`sync.rs`).
+- **§8, locking.** There is no lock on the active file and no separate publish gate: the writer thread owns the file.
+  A mutex serializes merges, and the keydir's `RwLock` and the read-handle cache's `RwLock`, taken in that order, are
+  the rest. A poisoned lock panics (`sync.rs`).
 - **§9, API.** `Error` is hand-written, not `thiserror`; `Options` has `key_order` and `metrics`; a read-only open
   creates nothing.
 

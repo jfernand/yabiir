@@ -6,12 +6,12 @@ protects the data itself, since that's the thing a key/value store can least aff
 
 ## 1. Correctness and data integrity
 
-The property-based model test (`tests/model.rs`), the concurrency stress tests and the hook-driven race tests
-(`src/engine/tests/races.rs`) already catch real bugs — the merge/recovery ordering issue was found by the model test,
+The property-based model test (`crates/yabiir/tests/model.rs`), the concurrency stress tests and the hook-driven race tests
+(`crates/yabiir/src/engine/tests/races.rs`) already catch real bugs — the merge/recovery ordering issue was found by the model test,
 and its concurrent form by a race test — but they only exercise one process, on one machine, with almost no injected
 faults: one test makes a merge fail part-way, and nothing makes an append or an fsync fail. The code paths for those
-failures (`src/writer.rs` closes the active file and starts a new one; `src/commit.rs` fails every write a failed fsync
-might have covered) are reasoned through and unit-tested at the group-commit level, not exercised end to end. The
+failures (`crates/yabiir/src/writer.rs` stops appending to the active file, fails every write a failed `write` or fsync might have
+covered, and starts a new file) are reasoned through and unit-tested at the group-commit level, not exercised end to end. The
 next step up is deterministic simulation testing: running the engine under a harness like `madsim` or `turmoil` (or
 similar deterministic-simulation frameworks) that can inject disk latency, reordering, and partial writes, then
 replay any failure byte-for-byte to debug it. Getting there needs two things the codebase doesn't have yet. First,
@@ -31,8 +31,8 @@ a client actually issued and whether it was acknowledged, then checking the stat
 process mid-run is consistent with *some* valid prefix of those acknowledged operations — would verify the crash
 recovery story empirically instead of by code review. Power failure testing is the sharper version of the same
 question, aimed specifically at the `should_sync_on_put` guarantee: the reasoning for why a `put` that returns `Ok`
-under `should_sync_on_put: true` is durable against a true power loss is laid out in `src/commit.rs`,
-`src/writer.rs` and the two `.typ` design reports, but nothing today actually pulls power (or simulates it, e.g. with block-layer fault
+under `should_sync_on_put: true` is durable against a true power loss is laid out in
+`crates/yabiir/src/writer.rs` and the two `.typ` design reports, but nothing today actually pulls power (or simulates it, e.g. with block-layer fault
 injection) to confirm it. That reasoning has never been checked against reality.
 
 Where to start:
@@ -84,7 +84,7 @@ rebuild-into-a-fresh-map pass, rather than leaving it to whatever the system all
 Where to start:
 
 - For backpressure, the cheap version: cap `put`/`delete` (block, or return an error) once the count of un-merged
-  files crosses a configurable threshold — a small, local change to the writer thread (`src/writer.rs`).
+  files crosses a configurable threshold — a small, local change to the writer thread (`crates/yabiir/src/writer.rs`).
 - The more thorough version: have `Engine` schedule its own background merge automatically past a low-water mark,
   instead of leaving callers (like `loadtest`'s `--merge-interval-secs`) to manage timing themselves — a bigger
   change than the cap above.
@@ -112,7 +112,7 @@ corrupted or vanished backing file, instead of a `Result`) and the larger-than-m
 `docs/reading-databases.pdf` §24, so either one should sit behind a feature flag next to the plain path, not replace
 it.
 
-The single writer is a thread, `src/writer.rs`, and every write is a batch sent to it. It takes whatever batches are
+The single writer is a thread, `crates/yabiir/src/writer.rs`, and every write is a batch sent to it. It takes whatever batches are
 queued as one group: checks their conditions, appends each as one record, hands the group to the OS in one `write`
 (and one fsync, with `sync_on_put`), then publishes the group to the keydir in log order under one lock, as the
 paper's keydir is "atomically updated with the location of the newest data". Rotation and the start of a merge are
@@ -150,7 +150,7 @@ Where to start:
 
 ## 4. Observability
 
-The first two pieces are in place. `Options::metrics` takes an `Arc<dyn Metrics>` (`src/metrics.rs`): durations of
+The first two pieces are in place. `Options::metrics` takes an `Arc<dyn Metrics>` (`crates/yabiir/src/metrics.rs`): durations of
 `put`/`get`/`delete`/`merge`/`sync`, the depth of merge's repoint queue at each flush, and a summary per merge pass
 (files compacted, entries copied). The crate picks no backend; `examples/bsky_firehose.rs` in `yabiir-examples` shows
 one wired to a live dashboard. With the `tracing` feature, the warnings recovery and merge print (corrupt or truncated

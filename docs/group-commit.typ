@@ -402,18 +402,18 @@ before anyone else can append to it, and the next write starts a new one. A call
 A caller that gets `Ok` can. The coordinator also recovers if the leader's
 fsync panics, instead of leaving every later writer waiting.
 
-*The code moved.* The coordinator is still `src/commit.rs` (now
-`crates/yabiir/src/commit.rs`), with the counters renamed
-`newest_generation` and `durable_generation`. `Engine::append` became
-`Writer::append` in `src/writer.rs`, which owns the active file, the file-id
-counter and the coordinator behind one lock. A write that doesn't ask for
-`sync_on_put` no longer takes a generation at all.
+*The code moved, and in 0.9 the coordinator went away.* It first became
+`crates/yabiir/src/commit.rs`, with the counters renamed `newest_generation`
+and `durable_generation`, and `Engine::append` became `Writer::append`. Since
+0.9 there is no `commit.rs` and there are no generations: one writer thread,
+in `crates/yabiir/src/writer.rs`, takes whatever writes are queued as a group
+and gives the group one `write` and one fsync.
 
-*The keydir is updated inside the append lock*, before the shared fsync,
-not after it. That closed a race in which two writes to one key could update
-the keydir out of log order. Its cost is stated in the README: with
-`sync_on_put`, another thread can read a value just before it is durable.
-The writer itself still returns only after the fsync.
+*The keydir was then updated inside the append lock*, before the shared
+fsync. That closed a race in which two writes to one key could update the
+keydir out of log order, at a cost: with `sync_on_put`, another thread could
+read a value just before it was durable. Since 0.9 the writer thread publishes
+after the fsync, in log order, so a write is visible only once it is durable.
 
 The merge/recovery ordering gap that the last section calls unrelated is
 closed too; `src/merge/mod.rs` explains how.

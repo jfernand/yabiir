@@ -12,3 +12,6 @@ restart
 /mutants.out
 # the book PDF is built from book/ by book/tools/build.sh
 /book/databases.pdf
+# reference PDFs are symlinks into the local bibliography library
+/refs/*
+!/refs/README.md

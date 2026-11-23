@@ -215,3 +215,9 @@ Changing a row instead of removing it writes a new record the same way, and it's
   [When to merge: the cost of running it against the space it recovers.],
   [Conditions beyond `=` and `BETWEEN`.],
 )
+// chapter-status:begin
+// stage: early-draft
+// revision: 1
+// body: 0a35379e4096
+// activity: 2026-11-22 | r1 | stage | yabiir | note | migrated from Incipient; text complete, not reviewed by the author
+// chapter-status:end

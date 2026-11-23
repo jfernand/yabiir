@@ -142,3 +142,9 @@ That's the difference: the calculus states the answer, and the algebra computes 
   [Codd's reduction, step by step, on the oldest-computer query.],
   [The oldest-computer query run for real, as a hand translation against yabiir.],
 )
+// chapter-status:begin
+// stage: research-done
+// revision: 1
+// body: 93c55ab07a90
+// activity: 2026-11-22 | r1 | stage | yabiir | note | migrated from Incipient; prose incomplete
+// chapter-status:end

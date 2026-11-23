@@ -294,3 +294,9 @@ order. @ch-keydir adds the first condition that drops rows, and the index that a
   [Without `ORDER BY`, any order is correct, and yabiir's changes with each open.],
 )
 
+// chapter-status:begin
+// stage: early-draft
+// revision: 3
+// body: bca2f1a01192
+// activity: 2026-11-22 | r3 | stage | yabiir | note | migrated from Incipient; text complete, not reviewed by the author
+// chapter-status:end

@@ -134,3 +134,9 @@ table by something other than its key.
   [Measured: hash keydir against `BTreeMap` for `get`, `insert` and the rebuild at open.],
   [B-tree against skip list and sorted vector, here or in a later chapter.],
 )
+// chapter-status:begin
+// stage: research-done
+// revision: 3
+// body: cf16c9d68749
+// activity: 2026-11-22 | r3 | stage | yabiir | note | migrated from Incipient; prose incomplete
+// chapter-status:end

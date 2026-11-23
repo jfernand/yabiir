@@ -343,3 +343,9 @@ makes `INSERT` mean what it says. The engine underneath still stores a key and a
   [What happens to stored rows when a schema changes.],
   [The cost of decoding, measured apart from the cost of reading.],
 )
+// chapter-status:begin
+// stage: early-draft
+// revision: 1
+// body: 748a28610d3a
+// activity: 2026-11-22 | r1 | stage | yabiir | note | migrated from Incipient; text complete, not reviewed by the author
+// chapter-status:end

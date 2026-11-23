@@ -151,3 +151,9 @@ That's a secondary index: one more table, paid for on every write.
    `Cond::Version`, measured against one `put` per key.],
   [An inverted index built for real over the Bluesky firehose posts that `gulp` stores.],
 )
+// chapter-status:begin
+// stage: research-done
+// revision: 5
+// body: 09756ec2c862
+// activity: 2026-11-22 | r5 | stage | yabiir | note | migrated from Incipient; prose incomplete
+// chapter-status:end

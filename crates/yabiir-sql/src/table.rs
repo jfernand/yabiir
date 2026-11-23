@@ -3,12 +3,13 @@
 //! and `INSERT` writes them. The engine underneath is unchanged.
 //!
 //! ```text
-//! statement := select | insert
+//! statement := select | insert | delete
 //! select    := SELECT [DISTINCT] fields [WHERE condition]
 //! fields    := '*' | name { ',' name }
 //! condition := name '=' literal
 //!            | name BETWEEN literal AND literal
 //! insert    := INSERT INTO store VALUES '(' literal { ',' literal } ')'
+//! delete    := DELETE FROM store [WHERE condition]
 //! literal   := string | integer
 //! ```
 //!
@@ -245,6 +246,8 @@ pub enum Error {
         key: String,
         why: String,
     },
+    /// `DELETE` kept finding its rows changed, and gave up.
+    TooManyConflicts(usize),
     Store(yabiir::Error),
 }
 
@@ -273,6 +276,12 @@ impl fmt::Display for Error {
                     Literal(key.as_bytes())
                 )
             }
+            Error::TooManyConflicts(attempts) => {
+                write!(
+                    f,
+                    "the rows kept changing; gave up after {attempts} attempts"
+                )
+            }
             Error::Store(e) => write!(f, "{e}"),
         }
     }
@@ -297,6 +306,7 @@ impl From<yabiir::Error> for Error {
 pub enum Statement {
     Select(Select),
     Insert(Insert),
+    Delete(Delete),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,8 +354,15 @@ pub struct Insert {
     pub values: Vec<Datum>,
 }
 
-const RESERVED: [&str; 8] = [
-    "SELECT", "DISTINCT", "WHERE", "BETWEEN", "AND", "INSERT", "INTO", "VALUES",
+/// `DELETE FROM table [WHERE condition]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delete {
+    pub table: String,
+    pub condition: Option<Condition>,
+}
+
+const RESERVED: [&str; 10] = [
+    "SELECT", "DISTINCT", "WHERE", "BETWEEN", "AND", "INSERT", "INTO", "VALUES", "DELETE", "FROM",
 ];
 
 /// Parse one statement.
@@ -358,8 +375,10 @@ pub fn parse(text: &str) -> Result<Statement, ParseError> {
         Statement::Select(select(&mut p)?)
     } else if p.is_word("INSERT") {
         Statement::Insert(insert(&mut p)?)
+    } else if p.is_word("DELETE") {
+        Statement::Delete(delete(&mut p)?)
     } else {
-        return Err(p.error("SELECT or INSERT"));
+        return Err(p.error("SELECT, INSERT or DELETE"));
     };
     if *p.peek() != Token::End {
         return Err(p.error("the end"));
@@ -456,6 +475,19 @@ fn insert(p: &mut Parser) -> Result<Insert, ParseError> {
     }
     p.advance();
     Ok(Insert { table, values })
+}
+
+fn delete(p: &mut Parser) -> Result<Delete, ParseError> {
+    p.expect_word("DELETE")?;
+    p.expect_word("FROM")?;
+    let table = name(p, "a table")?;
+    let condition = if p.is_word("WHERE") {
+        p.advance();
+        Some(condition(p)?)
+    } else {
+        None
+    };
+    Ok(Delete { table, condition })
 }
 
 /// A tree of operators over rows of [`Datum`]s.
@@ -660,6 +692,18 @@ impl Plan {
         }
     }
 
+    /// Whether `row`, read again by its key, still passes this plan's
+    /// conditions. A leaf's own condition is on the key, which a row keeps.
+    fn still_selects(&self, row: &[Datum]) -> bool {
+        match self {
+            Plan::FullScan | Plan::Get(_) | Plan::RangeScan(..) => true,
+            Plan::Filter {
+                index, test, input, ..
+            } => test.holds_for(&row[*index]) && input.still_selects(row),
+            Plan::Project { input, .. } | Plan::Distinct(input) => input.still_selects(row),
+        }
+    }
+
     fn explain(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
         let indent = "  ".repeat(depth);
         match self {
@@ -784,6 +828,86 @@ pub fn insert_row(insert: &Insert, schema: &Schema, store: &Engine) -> Result<()
     }
 }
 
+/// Decide which rows a `DELETE` removes: the plan of the `SELECT *` with the
+/// same condition.
+pub fn plan_delete(delete: &Delete, schema: &Schema, order: KeyOrder) -> Result<Plan, Error> {
+    if !delete
+        .table
+        .eq_ignore_ascii_case("store")
+    {
+        return Err(Error::NoSuchTable(
+            delete
+                .table
+                .to_ascii_lowercase(),
+        ));
+    }
+    let select = Select {
+        distinct: false,
+        fields: Fields::All,
+        condition: delete
+            .condition
+            .clone(),
+    };
+    plan(&select, schema, order)
+}
+
+/// What a `DELETE` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deleted {
+    pub rows: usize,
+    /// How many records the plan's leaf read, over every attempt.
+    pub visited: usize,
+}
+
+/// How many times a `DELETE` starts over before it reports a conflict.
+const DELETE_ATTEMPTS: usize = 16;
+
+/// Run a `DELETE`: find the rows, then remove them in one batch, each guarded
+/// by the version it had when it was checked against the condition. Either
+/// every row goes or none does, and a row that changed in between stops the
+/// batch, which starts over. A row that starts to match after the scan stays.
+pub fn delete_rows(plan: &Plan, schema: &Schema, store: &Engine) -> Result<Deleted, Error> {
+    let mut visited = 0;
+    for _ in 0..DELETE_ATTEMPTS {
+        let found = execute(plan, schema, store)?;
+        visited += found.visited;
+        let mut batch = Vec::with_capacity(
+            2 * found
+                .rows
+                .len(),
+        );
+        for row in &found.rows {
+            let Datum::Text(key) = &row[0] else {
+                unreachable!("the key's domain is text");
+            };
+            let key = key.as_bytes();
+            let Some(current) = store.get_versioned(key)? else {
+                continue;
+            };
+            if plan.still_selects(&schema.row(key, &current.value)?) {
+                batch.push(Op::Check {
+                    key: key.to_vec(),
+                    cond: Cond::Version(current.version),
+                });
+                batch.push(Op::Delete { key: key.to_vec() });
+            }
+        }
+        let rows = batch.len() / 2;
+        if rows == 0 {
+            return Ok(Deleted { rows, visited });
+        }
+        match store
+            .write_batch(batch)
+            .wait()
+        {
+            Ok(_) => return Ok(Deleted { rows, visited }),
+            Err(yabiir::Error::ConditionFailed { .. }) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(Error::TooManyConflicts(DELETE_ATTEMPTS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,6 +932,10 @@ mod tests {
     fn exec(store: &Engine, text: &str) -> Result<Option<Rows>, Error> {
         match parse(text)? {
             Statement::Insert(i) => insert_row(&i, &schema(), store).map(|()| None),
+            Statement::Delete(d) => {
+                let p = plan_delete(&d, &schema(), store.key_order())?;
+                delete_rows(&p, &schema(), store).map(|_| None)
+            }
             Statement::Select(s) => {
                 let p = plan(&s, &schema(), store.key_order())?;
                 execute(&p, &schema(), store).map(Some)
@@ -1029,6 +1157,112 @@ mod tests {
         ));
     }
 
+    fn delete(store: &Engine, text: &str) -> Result<Deleted, Error> {
+        let Statement::Delete(d) = parse(text)? else {
+            unreachable!()
+        };
+        let p = plan_delete(&d, &schema(), store.key_order())?;
+        delete_rows(&p, &schema(), store)
+    }
+
+    fn keys(store: &Engine) -> Vec<String> {
+        sorted(
+            &exec(store, "SELECT key")
+                .unwrap()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn delete_by_key_removes_one_row_and_a_missing_key_removes_none() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        let done = delete(&store, "DELETE FROM store WHERE key = 'c64'").unwrap();
+        assert_eq!(
+            done,
+            Deleted {
+                rows: 1,
+                visited: 1
+            }
+        );
+        let done = delete(&store, "DELETE FROM store WHERE key = 'c64'").unwrap();
+        assert_eq!(
+            done,
+            Deleted {
+                rows: 0,
+                visited: 0
+            }
+        );
+        assert_eq!(
+            keys(&store),
+            ["apple-ii", "bbc-micro", "ibm-pc", "zx-spectrum"]
+        );
+    }
+
+    #[test]
+    fn delete_by_condition_removes_every_match_and_nothing_else() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        let done = delete(&store, "DELETE FROM store WHERE year = 1982").unwrap();
+        assert_eq!(
+            done,
+            Deleted {
+                rows: 2,
+                visited: 5
+            }
+        );
+        assert_eq!(keys(&store), ["apple-ii", "bbc-micro", "ibm-pc"]);
+        let done = delete(&store, "DELETE FROM store").unwrap();
+        assert_eq!(done.rows, 3);
+        assert!(keys(&store).is_empty());
+    }
+
+    #[test]
+    fn delete_checks_its_table_and_its_condition() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        assert!(matches!(
+            delete(&store, "DELETE FROM computers"),
+            Err(Error::NoSuchTable(t)) if t == "computers"
+        ));
+        assert!(matches!(
+            delete(&store, "DELETE FROM store WHERE year = '1982'"),
+            Err(Error::Domain { .. })
+        ));
+        assert_eq!(keys(&store).len(), 5);
+    }
+
+    #[test]
+    fn delete_leaves_a_row_that_stopped_matching_after_the_scan() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        let Statement::Delete(d) = parse("DELETE FROM store WHERE year = 1982").unwrap() else {
+            unreachable!()
+        };
+        let p = plan_delete(&d, &schema(), store.key_order()).unwrap();
+        // The row changes after a scan would have found it: re-reading it by
+        // key is what keeps it.
+        let moved = schema().encode(&[Datum::Text("commodore".into()), Datum::Integer(1990)]);
+        store
+            .put(b"c64", &moved, yabiir::now_unix())
+            .unwrap();
+        let row = schema()
+            .row(b"c64", &moved)
+            .unwrap();
+        assert!(!p.still_selects(&row));
+        assert_eq!(
+            delete_rows(&p, &schema(), &store)
+                .unwrap()
+                .rows,
+            1
+        );
+        assert_eq!(keys(&store), ["apple-ii", "bbc-micro", "c64", "ibm-pc"]);
+    }
+
     #[test]
     fn syntax_errors_say_where() {
         for (text, at) in [
@@ -1036,6 +1270,9 @@ mod tests {
             ("SELECT maker,", 13),
             ("SELECT * WHERE", 14),
             ("INSERT store", 7),
+            ("DELETE store", 7),
+            ("DELETE FROM", 11),
+            ("DELETE FROM store WHERE", 23),
             ("INSERT INTO store VALUES 'a'", 25),
             ("INSERT INTO store VALUES ('a' 'b')", 30),
             ("SELECT * WHERE year = 99999999999999999999", 22),

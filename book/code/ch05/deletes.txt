@@ -1,0 +1,118 @@
+$ sql DIR "INSERT INTO store VALUES ('apple-ii', 'apple', 1977)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('ibm-pc', 'ibm', 1981)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('bbc-micro', 'acorn', 1981)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('zx-spectrum', 'sinclair', 1982)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('c64', 'commodore', 1982)"
+inserted 1 row
+
+$ sql DIR "DELETE FROM store WHERE key = 'c64'"
+plan:
+  Delete (one batch)
+    Get 'c64' (get: one lookup)
+deleted 1 row
+rows visited: 1
+
+$ dump-tail DIR 35
+6e bc 88 3a 0b 00 00 00 06 00 00 00 00 00 00 00  n..:............
+44 96 03 6b 01 00 00 00 03 00 00 80 00 00 00 00  D..k............
+63 36 34                                         c64
+(35 bytes)
+
+$ sql DIR "SELECT * WHERE key = 'c64'"
+plan:
+  Get 'c64' (get: one lookup)
+ key | maker | year
+-----+-------+------
+(0 rows)
+rows visited: 0
+
+$ sql DIR "DELETE FROM store WHERE key = 'c64'"
+plan:
+  Delete (one batch)
+    Get 'c64' (get: one lookup)
+deleted 0 rows
+rows visited: 0
+
+$ sql DIR "INSERT INTO store VALUES ('c64', 'commodore', 1982)"
+inserted 1 row
+
+$ sql DIR "DELETE FROM store WHERE year = 1982"
+plan:
+  Delete (one batch)
+    Filter year = 1982
+      FullScan (fold: every row)
+deleted 2 rows
+rows visited: 5
+
+$ sql DIR "SELECT *"
+plan:
+  FullScan (fold: every row)
+ key       | maker | year
+-----------+-------+------
+ ibm-pc    | ibm   | 1981
+ apple-ii  | apple | 1977
+ bbc-micro | acorn | 1981
+(3 rows)
+rows visited: 3
+
+$ sql DIR "DELETE FROM store WHERE year = '1981'"
+error: year must be an integer; '1981' isn't
+
+$ sql DIR "DELETE FROM computers"
+error: no table named computers; the only table is store
+
+$ sql DIR "DELETE FROM store WHERE maker BETWEEN 'a' AND 'b'"
+plan:
+  Delete (one batch)
+    Filter maker BETWEEN 'a' AND 'b'
+      FullScan (fold: every row)
+deleted 2 rows
+rows visited: 3
+
+$ sql DIR "SELECT *"
+plan:
+  FullScan (fold: every row)
+ key    | maker | year
+--------+-------+------
+ ibm-pc | ibm   | 1981
+(1 row)
+rows visited: 1
+
+$ sql DIR "DELETE FROM store"
+plan:
+  Delete (one batch)
+    FullScan (fold: every row)
+deleted 1 row
+rows visited: 1
+
+$ sql DIR "SELECT *"
+plan:
+  FullScan (fold: every row)
+ key | maker | year
+-----+-------+------
+(0 rows)
+rows visited: 0
+
+$ delete-crash DIR
+               bytes  cuts   rows after reopening
+one-at-a-time    157   158   5, 4, 3, 2, 1
+one-batch         85    86   5, 1
+
+$ delete-race DIR
+                   rounds  rows lost
+scan, then delete   20000       1581
+guarded batch       20000          0
+
+$ space DIR
+                   rows  data bytes  hint bytes
+inserted         100000     6500024           0
+after DELETE      50000     7400048           0
+after merge       50000     3250024     1900012

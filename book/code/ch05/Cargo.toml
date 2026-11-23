@@ -1,0 +1,17 @@
+[package]
+name = "deletes"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not a member of the yabiir workspace: book programs build on their own.
+[workspace]
+
+[[bin]]
+name = "sql"
+path = "src/main.rs"
+
+[dependencies]
+attributes = { path = "../ch04" }
+yabiir = { path = "../../../crates/yabiir" }
+yabiir-sql = { path = "../../../crates/yabiir-sql" }

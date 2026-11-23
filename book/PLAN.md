@@ -98,10 +98,14 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 
 ### D2. `DELETE` — by key, then by condition
 
-- `DELETE FROM computers WHERE key = 'c64'` → one tombstone.
-- `DELETE FROM computers WHERE year < 1980` → σ, then one tombstone per match: the first
+- `DELETE FROM store WHERE key = 'c64'` → one tombstone.
+- `DELETE FROM store WHERE year = 1982` → σ, then one tombstone per match, in one batch: the first
   set-at-a-time write.
-- **yabiir needs:** `delete`. Where the space goes is `merge` — a natural place for it.
+- **yabiir needs:** `delete`, and `write_batch` with `Cond::Version` on each match, so a crash can't
+  leave the statement half done and a row changed after the scan isn't removed. Where the space goes
+  is `merge`.
+- **Status:** Chapter 5, *DELETE*, drafted (2026-11-22). The crash and the race are measured
+  (`book/code/ch05/`). It stays with `=` and `BETWEEN`; other comparisons wait until a chapter needs them.
 
 ### D3. `UPDATE` — non-key attributes, then the key
 
@@ -144,7 +148,7 @@ Not an operator: the fix for step 4's slow σ on non-key attributes.
 - **Status:** Chapter 4 states the costs and, since 0.9, the atomic batch and version check that keep
   an index consistent; the index layer itself isn't built.
 - **Placement:** after D2, D3 and tables: an index is one more table, and it has to be maintained on
-  insert, update and delete. Its draft is Chapter 5 for now, and moves when those chapters exist.
+  insert, update and delete. Its draft is Chapter 6 for now, and moves when those chapters exist.
 
 ### 6. × — Cartesian product, and ρ — rename
 
@@ -219,7 +223,7 @@ an extension, with grouping defined over sets so it doesn't smuggle bags back in
 | 3a | text → tree → plan | `yabiir-sql` crate: parser, AST, planner, executor; `Engine::key_order` |
 | 4 | attributes in values | value codec (layer above the engine) |
 | D1 | `INSERT` | `put`; insert-if-absent as `write_batch` with `Cond::Absent` (0.9) |
-| D2 | `DELETE` | `delete` |
+| D2 | `DELETE` | one `write_batch` of `Op::Delete`, each with `Cond::Version` (0.9) |
 | D3 | `UPDATE` | read-modify-write: `get_versioned`, then `write_batch` with `Cond::Version` (0.9) |
 | 5 | `CREATE TABLE`, `UNION` / `INTERSECT` / `EXCEPT` | tables (key prefix); catalog as a table; merge of two scans |
 | 10 | faster σ on attributes | index tables, maintained in one `write_batch` with the record (0.9) |

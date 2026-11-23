@@ -577,7 +577,7 @@
   #v(14pt)
   #par(leading: 0.1em, display(if display-title != none { display-title } else { title }, size: ts.x5 + 10pt, weight: 800, fill: c.paper, tracking: -0.02em))
   #v(18pt)
-  #block(width: 85%, text(size: ts.lg, fill: c.steel-300, subtitle))
+  #block(width: 85%, par(justify: false, text(size: ts.lg, fill: c.steel-300, subtitle)))
   #v(2fr)
   #line(length: 100%, stroke: 0.75pt + c.steel-700)
   #v(4pt)

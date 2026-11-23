@@ -3,7 +3,7 @@
 #show: book.with(
   title: "Append Only",
   display-title: [Append\ Only],
-  subtitle: [Easing into databases one step at a time — from a single log file and a hash map to sorted keys, tables and indices, built in Rust on yabiir.],
+  subtitle: [Easing into databases one step at a time~— from a single log file and a hash map to sorted keys, tables and indices, built in Rust on yabiir.],
   author: "Javier Fernandez",
   credit: "JAVIER FERNANDEZ, EDITOR",
   edition: "Incipient draft · 2026",

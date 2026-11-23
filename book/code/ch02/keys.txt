@@ -1,0 +1,33 @@
+$ composite DIR
+integers, sorted by their bytes
+  as text          -1 100 256 42 7
+  little-endian    256 7 42 100 -1
+  big-endian       7 42 100 256 -1
+  sign bit flipped -1 7 42 100 256
+
+("alice", "INBOX", 42)
+02 61 6c 69 63 65 00 02 49 4e 42 4f 58 00 01 80  .alice..INBOX...
+00 00 00 00 00 00 2a                             ......*
+(23 bytes)
+
+strings, sorted by their encoded bytes
+  ("al", "z")
+  ("al\0x", "a")
+  ("alice", "a")
+  without terminators, ("al", "ice") and ("alice", "") are the same key: true
+
+scan of the prefix ("alice")
+  ("alice", "INBOX", 41)
+  ("alice", "INBOX", 42)
+  ("alice", "INBOX", 100)
+  ("alice", "Sent", 7)
+scan of the prefix ("alice", "INBOX")
+  ("alice", "INBOX", 41)
+  ("alice", "INBOX", 42)
+  ("alice", "INBOX", 100)
+
+$ keydir-times DIR
+1000000 keys, median of 3 runs
+keydir     put (ns)   get (ns)  open (ms)
+hashed         2401        962        478
+sorted         3653       1420       1002

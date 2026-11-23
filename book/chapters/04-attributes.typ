@@ -344,8 +344,9 @@ makes `INSERT` mean what it says. The engine underneath still stores a key and a
   [The cost of decoding, measured apart from the cost of reading.],
 )
 // chapter-status:begin
-// stage: early-draft
+// stage: research-done
 // revision: 1
 // body: 748a28610d3a
 // activity: 2026-11-22 | r1 | stage | yabiir | note | migrated from Incipient; text complete, not reviewed by the author
+// activity: 2026-11-23 | r1 | stage | yabiir | note | author: chapters nobody has reviewed are research-complete
 // chapter-status:end

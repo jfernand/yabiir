@@ -13,6 +13,8 @@
 //! with `INSERT`.
 
 mod ast;
+pub mod index;
+pub mod key;
 mod parse;
 mod plan;
 pub mod table;

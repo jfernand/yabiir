@@ -26,7 +26,8 @@
 #include "chapters/03-sql-to-get-and-scan.typ"
 #include "chapters/04-attributes.typ"
 #include "chapters/05-delete.typ"
-#include "chapters/06-secondary-indexes.typ"
+#include "chapters/06-update.typ"
+#include "chapters/07-secondary-indexes.typ"
 
 #appendices[
 #include "chapters/A-bags-and-nulls.typ"

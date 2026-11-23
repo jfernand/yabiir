@@ -164,8 +164,9 @@ other rows of the table stay full walks; @ch-sorted makes the ranges cheap.
    still full walks.],
 )
 // chapter-status:begin
-// stage: early-draft
+// stage: research-done
 // revision: 3
 // body: 236511dd8bea
 // activity: 2026-11-22 | r3 | stage | yabiir | note | migrated from Incipient; text complete, not reviewed by the author
+// activity: 2026-11-23 | r3 | stage | yabiir | note | author: chapters nobody has reviewed are research-complete
 // chapter-status:end

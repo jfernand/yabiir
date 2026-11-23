@@ -112,6 +112,9 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 - `UPDATE computers SET price = 299 WHERE key = 'c64'` → read, modify, append a new version.
 - On an append-only store, every update is a new record and the old one is garbage until `merge`.
 - Updating the **key** is a delete plus an insert, and the book says so: the key is the identity.
+- **Status:** Chapter 6, *UPDATE*, drafted (2026-11-22), with assignments from a literal or
+  `field + integer`. The lost update and the crash during a change of key are measured
+  (`book/code/ch06/`).
 - **The race:** two concurrent read-modify-writes lose one update. The fix is a compare-and-put:
   read with `get_versioned`, write a batch with `Cond::Version(v)` on the key, retry if the check
   fails (yabiir 0.9). It's the smallest transaction-shaped thing the book needs; multi-statement
@@ -145,10 +148,11 @@ Not an operator: the fix for step 4's slow σ on non-key attributes.
 
 - **yabiir needs:** an index table per indexed attribute, maintained on every write — in the same
   `write_batch` as the record (0.9), so a crash can't separate them.
-- **Status:** Chapter 4 states the costs and, since 0.9, the atomic batch and version check that keep
-  an index consistent; the index layer itself isn't built.
+- **Status:** Chapter 7 drafted (2026-11-22). `yabiir-sql`'s `index` module keeps a table and its
+  indices in one sorted store, on composite keys (`key` module), and the costs are measured. The
+  planner doesn't choose an index yet.
 - **Placement:** after D2, D3 and tables: an index is one more table, and it has to be maintained on
-  insert, update and delete. Its draft is Chapter 6 for now, and moves when those chapters exist.
+  insert, update and delete. Its draft is Chapter 7 for now, and moves after the set operators when tables exist.
 
 ### 6. × — Cartesian product, and ρ — rename
 

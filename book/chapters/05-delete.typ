@@ -3,7 +3,7 @@
 = DELETE <ch-delete>
 
 #status[Incipient. `DELETE` by key and by condition is in `yabiir-sql`, and every output is a real run
-of this chapter's programs. `UPDATE` is next.]
+of this chapter's programs.]
 
 #epigraph(source: [Justin Sheehy and David Smith, 2010 @sheehy2010bitcask])[Note that deletion is simply
 a write of a special tombstone value, which will be removed on the next merge.]
@@ -50,15 +50,15 @@ The row's record is still in the data file, untouched. What the `DELETE` added i
 record that says this key no longer has a value. Here's the literal end of the file:
 
 #output(title: "$ dump-tail DIR 35")[```
-6e bc 88 3a 0b 00 00 00 06 00 00 00 00 00 00 00  n..:............
-44 96 03 6b 01 00 00 00 03 00 00 80 00 00 00 00  D..k............
+c6 8d a8 e8 0b 00 00 00 06 00 00 00 00 00 00 00  ................
+aa b5 03 6b 01 00 00 00 03 00 00 80 00 00 00 00  ...k............
 63 36 34                                         c64
 (35 bytes)
 ```]
 
-Thirty-five bytes. `6e bc 88 3a` is the CRC, and `0b 00 00 00` says 11 bytes follow this record's
+Thirty-five bytes. `c6 8d a8 e8` is the CRC, and `0b 00 00 00` says 11 bytes follow this record's
 24-byte header. The next eight bytes are the sequence number, 6: this is the sixth write to the store.
-`44 96 03 6b` is the timestamp and `01 00 00 00` the number of operations. The operation is the last
+`aa b5 03 6b` is the timestamp and `01 00 00 00` the number of operations. The operation is the last
 eleven bytes: `03 00 00 80` is the key's length, 3, with the top bit set, and that bit is the whole
 difference between a tombstone and a put. `00 00 00 00` is the length of a value it doesn't have, and
 `63 36 34` spells `c64`.
@@ -142,11 +142,11 @@ will differ from run to run.]
 
 #output(title: "$ delete-race DIR")[```
                    rounds  rows lost
-scan, then delete   20000       1581
+scan, then delete   20000       2126
 guarded batch       20000          0
 ```]
 
-In 1,581 rounds the `DELETE` removed a row from 1990, which its condition excludes. The guarded
+In 2,126 rounds the `DELETE` removed a row from 1990, which its condition excludes. The guarded
 version reads each match again with its version #since("0.9"), tests the condition on what it read,
 and puts a check on that version in the batch beside the delete:
 
@@ -168,7 +168,7 @@ for row in &found.rows {
 ```
 
 If any of those rows changes before the batch commits, its check fails, nothing is written, and the
-statement starts again from a new scan.#footnote[It tries 16 times, then reports a conflict and
+statement starts again from a new scan.#footnote[It waits a random, growing time between attempts, and after 1,000 it reports a conflict and
 removes nothing. The code is `delete_rows`, in #repo("crates/yabiir-sql/src/table.rs").] The guard
 covers the rows the scan found. A row that starts to match after the scan isn't one of them, and it
 stays.
@@ -199,7 +199,7 @@ header. Merge halves the data, to exactly 65 bytes for each of the 50,000 rows l
 header. The hint file costs 38 bytes per row, so the store as a whole goes from 7.4 MB to 5.15 MB.
 
 That's `DELETE` on a log: a few bytes that say a row is gone, and a later pass that makes it true.
-Changing a row instead of removing it writes a new record the same way, and it's the next step.
+Changing a row instead of removing it writes a new record the same way, and that's @ch-update.
 
 #takeaways(
   [A `DELETE` appends a _tombstone_; the row's record stays in the file until a merge.],
@@ -211,13 +211,13 @@ Changing a row instead of removing it writes a new record the same way, and it's
 )
 
 #todo(
-  [`UPDATE`, with the same read, check and write.],
   [When to merge: the cost of running it against the space it recovers.],
   [Conditions beyond `=` and `BETWEEN`.],
 )
 // chapter-status:begin
-// stage: early-draft
-// revision: 1
-// body: 0a35379e4096
+// stage: research-done
+// revision: 2
+// body: 9a98b9f5f3dc
 // activity: 2026-11-22 | r1 | stage | yabiir | note | migrated from Incipient; text complete, not reviewed by the author
+// activity: 2026-11-23 | r1 | stage | yabiir | note | author: chapters nobody has reviewed are research-complete
 // chapter-status:end

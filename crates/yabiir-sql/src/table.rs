@@ -3,13 +3,15 @@
 //! and `INSERT` writes them. The engine underneath is unchanged.
 //!
 //! ```text
-//! statement := select | insert | delete
+//! statement := select | insert | delete | update
 //! select    := SELECT [DISTINCT] fields [WHERE condition]
 //! fields    := '*' | name { ',' name }
 //! condition := name '=' literal
 //!            | name BETWEEN literal AND literal
 //! insert    := INSERT INTO store VALUES '(' literal { ',' literal } ')'
 //! delete    := DELETE FROM store [WHERE condition]
+//! update    := UPDATE store SET assign { ',' assign } [WHERE condition]
+//! assign    := name '=' literal | name '=' name '+' integer
 //! literal   := string | integer
 //! ```
 //!
@@ -85,7 +87,7 @@ const TAG_TEXT: u8 = 2;
 /// domain of text; the schema lists the ones stored in the value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
-    columns: Vec<(String, Domain)>,
+    pub(crate) columns: Vec<(String, Domain)>,
 }
 
 impl Schema {
@@ -113,7 +115,7 @@ impl Schema {
             .collect()
     }
 
-    fn index_of(&self, name: &str) -> Result<usize, Error> {
+    pub(crate) fn index_of(&self, name: &str) -> Result<usize, Error> {
         self.columns
             .iter()
             .position(|(c, _)| c.eq_ignore_ascii_case(name))
@@ -121,7 +123,7 @@ impl Schema {
     }
 
     /// Fail unless `datum` is in the domain of column `index`.
-    fn check(&self, index: usize, datum: &Datum) -> Result<(), Error> {
+    pub(crate) fn check(&self, index: usize, datum: &Datum) -> Result<(), Error> {
         let (name, domain) = &self.columns[index];
         if datum.domain() == *domain {
             Ok(())
@@ -206,7 +208,7 @@ impl Schema {
     }
 
     /// A stored record as a row: the key, then its attributes.
-    fn row(&self, key: &[u8], value: &[u8]) -> Result<Vec<Datum>, Error> {
+    pub(crate) fn row(&self, key: &[u8], value: &[u8]) -> Result<Vec<Datum>, Error> {
         let show = || String::from_utf8_lossy(key).into_owned();
         let text = std::str::from_utf8(key).map_err(|_| Error::BadRecord {
             key: show(),
@@ -246,8 +248,14 @@ pub enum Error {
         key: String,
         why: String,
     },
-    /// `DELETE` kept finding its rows changed, and gave up.
+    /// A write kept finding its rows changed, and gave up.
     TooManyConflicts(usize),
+    /// `UPDATE` assigned one field twice.
+    RepeatedField(String),
+    /// `field + n` left the 64-bit integers.
+    Overflow(String),
+    /// An index was asked for on a field that doesn't have one.
+    NotIndexed(String),
     Store(yabiir::Error),
 }
 
@@ -282,6 +290,9 @@ impl fmt::Display for Error {
                     "the rows kept changing; gave up after {attempts} attempts"
                 )
             }
+            Error::RepeatedField(field) => write!(f, "{field} is assigned twice"),
+            Error::Overflow(field) => write!(f, "{field} would overflow 64 bits"),
+            Error::NotIndexed(field) => write!(f, "{field} has no index"),
             Error::Store(e) => write!(f, "{e}"),
         }
     }
@@ -307,6 +318,7 @@ pub enum Statement {
     Select(Select),
     Insert(Insert),
     Delete(Delete),
+    Update(Update),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,8 +373,32 @@ pub struct Delete {
     pub condition: Option<Condition>,
 }
 
-const RESERVED: [&str; 10] = [
+/// `UPDATE table SET assignments [WHERE condition]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Update {
+    pub table: String,
+    pub assignments: Vec<Assignment>,
+    pub condition: Option<Condition>,
+}
+
+/// `field = value`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    pub field: String,
+    pub value: Value,
+}
+
+/// What an assignment stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    Literal(Datum),
+    /// A field of the row as it was, plus an integer.
+    Plus(String, i64),
+}
+
+const RESERVED: [&str; 12] = [
     "SELECT", "DISTINCT", "WHERE", "BETWEEN", "AND", "INSERT", "INTO", "VALUES", "DELETE", "FROM",
+    "UPDATE", "SET",
 ];
 
 /// Parse one statement.
@@ -377,8 +413,10 @@ pub fn parse(text: &str) -> Result<Statement, ParseError> {
         Statement::Insert(insert(&mut p)?)
     } else if p.is_word("DELETE") {
         Statement::Delete(delete(&mut p)?)
+    } else if p.is_word("UPDATE") {
+        Statement::Update(update(&mut p)?)
     } else {
-        return Err(p.error("SELECT, INSERT or DELETE"));
+        return Err(p.error("SELECT, INSERT, DELETE or UPDATE"));
     };
     if *p.peek() != Token::End {
         return Err(p.error("the end"));
@@ -488,6 +526,51 @@ fn delete(p: &mut Parser) -> Result<Delete, ParseError> {
         None
     };
     Ok(Delete { table, condition })
+}
+
+fn update(p: &mut Parser) -> Result<Update, ParseError> {
+    p.expect_word("UPDATE")?;
+    let table = name(p, "a table")?;
+    p.expect_word("SET")?;
+    let mut assignments = vec![assignment(p)?];
+    while *p.peek() == Token::Comma {
+        p.advance();
+        assignments.push(assignment(p)?);
+    }
+    let condition = if p.is_word("WHERE") {
+        p.advance();
+        Some(condition(p)?)
+    } else {
+        None
+    };
+    Ok(Update {
+        table,
+        assignments,
+        condition,
+    })
+}
+
+fn assignment(p: &mut Parser) -> Result<Assignment, ParseError> {
+    let field = name(p, "a field")?;
+    if *p.peek() != Token::Equals {
+        return Err(p.error("'='"));
+    }
+    p.advance();
+    let value = if matches!(p.peek(), Token::Word(_)) {
+        let source = name(p, "a field or a literal")?;
+        if *p.peek() != Token::Plus {
+            return Err(p.error("'+'"));
+        }
+        p.advance();
+        let Token::Integer(n) = *p.peek() else {
+            return Err(p.error("an integer"));
+        };
+        p.advance();
+        Value::Plus(source, n)
+    } else {
+        Value::Literal(literal(p)?)
+    };
+    Ok(Assignment { field, value })
 }
 
 /// A tree of operators over rows of [`Datum`]s.
@@ -859,8 +942,22 @@ pub struct Deleted {
     pub visited: usize,
 }
 
-/// How many times a `DELETE` starts over before it reports a conflict.
-const DELETE_ATTEMPTS: usize = 16;
+/// How many times a write starts over before it reports a conflict.
+pub(crate) const WRITE_ATTEMPTS: usize = 1000;
+
+/// Wait before attempt `attempt + 1` of a write whose check failed. Writers
+/// that retry at once keep colliding, and one can lose every time, so each
+/// waits a random time from a range that doubles up to about a millisecond.
+pub(crate) fn back_off(attempt: usize) {
+    use std::hash::{BuildHasher, RandomState};
+    let ceiling = 1u64 << attempt.min(10);
+    let micros = RandomState::new().hash_one(attempt) % ceiling;
+    if micros == 0 {
+        std::thread::yield_now();
+    } else {
+        std::thread::sleep(std::time::Duration::from_micros(micros));
+    }
+}
 
 /// Run a `DELETE`: find the rows, then remove them in one batch, each guarded
 /// by the version it had when it was checked against the condition. Either
@@ -868,7 +965,7 @@ const DELETE_ATTEMPTS: usize = 16;
 /// batch, which starts over. A row that starts to match after the scan stays.
 pub fn delete_rows(plan: &Plan, schema: &Schema, store: &Engine) -> Result<Deleted, Error> {
     let mut visited = 0;
-    for _ in 0..DELETE_ATTEMPTS {
+    for attempt in 0..WRITE_ATTEMPTS {
         let found = execute(plan, schema, store)?;
         visited += found.visited;
         let mut batch = Vec::with_capacity(
@@ -901,11 +998,219 @@ pub fn delete_rows(plan: &Plan, schema: &Schema, store: &Engine) -> Result<Delet
             .wait()
         {
             Ok(_) => return Ok(Deleted { rows, visited }),
-            Err(yabiir::Error::ConditionFailed { .. }) => {}
+            Err(yabiir::Error::ConditionFailed { .. }) => back_off(attempt),
             Err(e) => return Err(e.into()),
         }
     }
-    Err(Error::TooManyConflicts(DELETE_ATTEMPTS))
+    Err(Error::TooManyConflicts(WRITE_ATTEMPTS))
+}
+
+/// How an `UPDATE` computes one field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Compute {
+    Set(Datum),
+    Add(usize, i64),
+}
+
+/// Which rows an `UPDATE` changes, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePlan {
+    selection: Plan,
+    sets: Vec<(usize, Compute)>,
+    label: String,
+}
+
+impl UpdatePlan {
+    /// The row with the assignments applied, all computed from the old row.
+    fn apply(&self, old: &[Datum], schema: &Schema) -> Result<Vec<Datum>, Error> {
+        let mut new = old.to_vec();
+        for (index, compute) in &self.sets {
+            new[*index] = match compute {
+                Compute::Set(datum) => datum.clone(),
+                Compute::Add(source, n) => {
+                    let Datum::Integer(v) = old[*source] else {
+                        unreachable!("the planner checked the domain");
+                    };
+                    Datum::Integer(
+                        v.checked_add(*n)
+                            .ok_or_else(|| {
+                                Error::Overflow(
+                                    schema.columns[*index]
+                                        .0
+                                        .clone(),
+                                )
+                            })?,
+                    )
+                }
+            };
+        }
+        Ok(new)
+    }
+}
+
+/// The plan as an indented tree, root first.
+impl fmt::Display for UpdatePlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Update {} (one batch)", self.label)?;
+        self.selection
+            .explain(f, 1)
+    }
+}
+
+/// Check an `UPDATE` against the schema, and plan it.
+pub fn plan_update(update: &Update, schema: &Schema, order: KeyOrder) -> Result<UpdatePlan, Error> {
+    if !update
+        .table
+        .eq_ignore_ascii_case("store")
+    {
+        return Err(Error::NoSuchTable(
+            update
+                .table
+                .to_ascii_lowercase(),
+        ));
+    }
+    let mut sets: Vec<(usize, Compute)> = Vec::new();
+    let mut labels = Vec::new();
+    for assignment in &update.assignments {
+        let index = schema.index_of(&assignment.field)?;
+        let name = &schema.columns[index].0;
+        if sets
+            .iter()
+            .any(|(i, _)| *i == index)
+        {
+            return Err(Error::RepeatedField(name.clone()));
+        }
+        let compute = match &assignment.value {
+            Value::Literal(datum) => {
+                schema.check(index, datum)?;
+                labels.push(format!("{name} = {}", Sql(datum)));
+                Compute::Set(datum.clone())
+            }
+            Value::Plus(source, n) => {
+                let from = schema.index_of(source)?;
+                let source = &schema.columns[from].0;
+                for (field, other) in [(name, source), (source, name)] {
+                    if schema.columns[schema.index_of(field)?].1 != Domain::Integer {
+                        return Err(Error::Domain {
+                            field: field.clone(),
+                            domain: Domain::Integer,
+                            found: format!("{other} + {n}"),
+                        });
+                    }
+                }
+                labels.push(format!("{name} = {source} + {n}"));
+                Compute::Add(from, *n)
+            }
+        };
+        sets.push((index, compute));
+    }
+    let select = Select {
+        distinct: false,
+        fields: Fields::All,
+        condition: update
+            .condition
+            .clone(),
+    };
+    Ok(UpdatePlan {
+        selection: plan(&select, schema, order)?,
+        sets,
+        label: labels.join(", "),
+    })
+}
+
+/// What an `UPDATE` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Updated {
+    pub rows: usize,
+    /// How many records the plan's leaf read, over every attempt.
+    pub visited: usize,
+    /// How many times the batch failed its checks and started over.
+    pub retries: usize,
+}
+
+/// Run an `UPDATE`: read each row with its version, compute the new row from
+/// it, and write them all in one batch guarded by those versions. If any row
+/// changed in between, nothing is written and the statement starts over. A
+/// new key is a delete and an insert, and it must not be taken.
+pub fn update_rows(plan: &UpdatePlan, schema: &Schema, store: &Engine) -> Result<Updated, Error> {
+    let mut visited = 0;
+    for retries in 0..WRITE_ATTEMPTS {
+        let found = execute(&plan.selection, schema, store)?;
+        visited += found.visited;
+        let mut batch = Vec::new();
+        let mut rows = 0;
+        let mut moved_to = None;
+        for row in &found.rows {
+            let Datum::Text(key) = &row[0] else {
+                unreachable!("the key's domain is text");
+            };
+            let key = key.as_bytes();
+            let Some(current) = store.get_versioned(key)? else {
+                continue;
+            };
+            let old = schema.row(key, &current.value)?;
+            if !plan
+                .selection
+                .still_selects(&old)
+            {
+                continue;
+            }
+            let new = plan.apply(&old, schema)?;
+            let Datum::Text(new_key) = &new[0] else {
+                unreachable!("the key's domain is text");
+            };
+            rows += 1;
+            batch.push(Op::Check {
+                key: key.to_vec(),
+                cond: Cond::Version(current.version),
+            });
+            if new_key.as_bytes() != key {
+                moved_to = Some(new_key.clone());
+                batch.push(Op::Check {
+                    key: new_key
+                        .clone()
+                        .into_bytes(),
+                    cond: Cond::Absent,
+                });
+                batch.push(Op::Delete { key: key.to_vec() });
+            }
+            batch.push(Op::Put {
+                key: new_key
+                    .clone()
+                    .into_bytes(),
+                value: schema.encode(&new[1..]),
+            });
+        }
+        if rows == 0 {
+            return Ok(Updated {
+                rows,
+                visited,
+                retries,
+            });
+        }
+        // Keys are assigned literals, so two rows would get the same one.
+        if let (Some(key), true) = (&moved_to, rows > 1) {
+            return Err(Error::DuplicateKey(key.clone()));
+        }
+        match store
+            .write_batch(batch)
+            .wait()
+        {
+            Ok(_) => {
+                return Ok(Updated {
+                    rows,
+                    visited,
+                    retries,
+                });
+            }
+            Err(yabiir::Error::ConditionFailed { index: 1 }) if moved_to.is_some() => {
+                return Err(Error::DuplicateKey(moved_to.unwrap_or_default()));
+            }
+            Err(yabiir::Error::ConditionFailed { .. }) => back_off(retries),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(Error::TooManyConflicts(WRITE_ATTEMPTS))
 }
 
 #[cfg(test)]
@@ -935,6 +1240,10 @@ mod tests {
             Statement::Delete(d) => {
                 let p = plan_delete(&d, &schema(), store.key_order())?;
                 delete_rows(&p, &schema(), store).map(|_| None)
+            }
+            Statement::Update(u) => {
+                let p = plan_update(&u, &schema(), store.key_order())?;
+                update_rows(&p, &schema(), store).map(|_| None)
             }
             Statement::Select(s) => {
                 let p = plan(&s, &schema(), store.key_order())?;
@@ -1263,6 +1572,137 @@ mod tests {
         assert_eq!(keys(&store), ["apple-ii", "bbc-micro", "c64", "ibm-pc"]);
     }
 
+    fn update(store: &Engine, text: &str) -> Result<Updated, Error> {
+        let Statement::Update(u) = parse(text)? else {
+            unreachable!()
+        };
+        let p = plan_update(&u, &schema(), store.key_order())?;
+        update_rows(&p, &schema(), store)
+    }
+
+    fn all(store: &Engine) -> Vec<String> {
+        sorted(
+            &exec(store, "SELECT *")
+                .unwrap()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn update_changes_the_matching_rows_and_only_those() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        let done = update(&store, "UPDATE store SET maker = 'cbm' WHERE key = 'c64'").unwrap();
+        assert_eq!((done.rows, done.visited), (1, 1));
+        let done = update(
+            &store,
+            "UPDATE store SET year = year + 10 WHERE year = 1981",
+        )
+        .unwrap();
+        assert_eq!(done.rows, 2);
+        assert_eq!(
+            all(&store),
+            [
+                "apple-ii apple 1977",
+                "bbc-micro acorn 1991",
+                "c64 cbm 1982",
+                "ibm-pc ibm 1991",
+                "zx-spectrum sinclair 1982"
+            ]
+        );
+        assert_eq!(
+            update(&store, "UPDATE store SET year = 1 WHERE key = 'nope'")
+                .unwrap()
+                .rows,
+            0
+        );
+    }
+
+    #[test]
+    fn every_assignment_reads_the_old_row() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        update(
+            &store,
+            "UPDATE store SET year = year + 1, maker = 'x' WHERE key = 'c64'",
+        )
+        .unwrap();
+        assert!(all(&store).contains(&"c64 x 1983".to_string()));
+    }
+
+    #[test]
+    fn updating_the_key_moves_the_row_unless_the_new_key_is_taken() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        update(&store, "UPDATE store SET key = 'c128' WHERE key = 'c64'").unwrap();
+        let rows = all(&store);
+        assert!(rows.contains(&"c128 commodore 1982".to_string()));
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.starts_with("c64 "))
+        );
+        assert!(matches!(
+            update(&store, "UPDATE store SET key = 'ibm-pc' WHERE key = 'c128'"),
+            Err(Error::DuplicateKey(k)) if k == "ibm-pc"
+        ));
+        assert!(matches!(
+            update(&store, "UPDATE store SET key = 'same' WHERE year = 1981"),
+            Err(Error::DuplicateKey(k)) if k == "same"
+        ));
+        assert_eq!(all(&store), rows);
+        assert_eq!(
+            update(&store, "UPDATE store SET key = 'c128' WHERE key = 'c128'")
+                .unwrap()
+                .rows,
+            1
+        );
+        assert_eq!(all(&store), rows);
+    }
+
+    #[test]
+    fn update_checks_domains_and_names() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        let before = all(&store);
+        for text in [
+            "UPDATE store SET year = 'x'",
+            "UPDATE store SET maker = 1",
+            "UPDATE store SET maker = maker + 1",
+            "UPDATE store SET year = maker + 1",
+            "UPDATE store SET key = year + 1",
+            "UPDATE store SET price = 1",
+            "UPDATE computers SET year = 1",
+            "UPDATE store SET year = 1, year = 2",
+            "UPDATE store SET year = year + 9223372036854775807",
+        ] {
+            assert!(update(&store, text).is_err(), "{text}");
+        }
+        assert_eq!(all(&store), before);
+    }
+
+    #[test]
+    fn concurrent_increments_all_count() {
+        let dir = TempDir::new();
+        let store = open(&dir, KeyOrder::Hashed);
+        fill(&store);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..50 {
+                        update(&store, "UPDATE store SET year = year + 1 WHERE key = 'c64'")
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        assert!(all(&store).contains(&"c64 commodore 2182".to_string()));
+    }
+
     #[test]
     fn syntax_errors_say_where() {
         for (text, at) in [
@@ -1271,6 +1711,10 @@ mod tests {
             ("SELECT * WHERE", 14),
             ("INSERT store", 7),
             ("DELETE store", 7),
+            ("UPDATE store year = 1", 13),
+            ("UPDATE store SET year", 21),
+            ("UPDATE store SET year = year", 28),
+            ("UPDATE store SET year = year + 'a'", 31),
             ("DELETE FROM", 11),
             ("DELETE FROM store WHERE", 23),
             ("INSERT INTO store VALUES 'a'", 25),

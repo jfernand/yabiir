@@ -37,7 +37,9 @@ fn main() {
                 Err(e) => println!("error: {e}"),
             }
         }
-        Statement::Delete(_) => println!("error: this chapter has no DELETE"),
+        Statement::Delete(_) | Statement::Update(_) => {
+            println!("error: this chapter has no DELETE or UPDATE")
+        }
         Statement::Select(select) => {
             let store = Engine::open(dir, options.read_only()).expect("open the store");
             let plan = match table::plan(&select, &schema, store.key_order()) {

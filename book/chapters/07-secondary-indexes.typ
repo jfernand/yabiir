@@ -2,8 +2,8 @@
 
 = Secondary Indices <ch-secondary>
 
-#status[Incipient. The idea and its costs are stated. yabiir 0.9 has the atomic write batch that keeps
-a record and its index entries consistent; the index layer that uses it isn't built.]
+#status[Draft. The index layer is in `yabiir-sql`, on yabiir 0.9's atomic write batch, and every output
+is a real run of this chapter's programs. The SQL planner doesn't use it yet.]
 
 A mailbox stored by `(account, mailbox, uid)` lists its messages in UID order, and an email
 program's search asks for them by sender and by date. Without another index it answers those by
@@ -105,6 +105,90 @@ record, and `Version(1)` matches the new one. yabiir's versions come from one co
 store, and survive merge and reopen: merge writes the counter's value into every file it creates,
 so the versions of the deleted keys it drops are still accounted for.]
 
+== An index layer
+
+yabiir-sql's index layer stores a table and its indices in one sorted store, using the composite keys
+of @ch-sorted. The first part of each key says which range it belongs to:#footnote[The code is
+#repo("crates/yabiir-sql/src/index.rs"), and every run in this chapter is from
+#repo("book/code/ch07/run.sh"), with its output in #repo("book/code/ch07/indexes.txt").]
+
+```text
+(1, key)                → the row's attributes
+(2 + i, value, key)     → nothing: index i says this row has this value
+```
+
+Maintenance lives in this layer, so a program can't write a row and forget its index. An insert is
+one batch: a check that the key is absent, the row, and one entry per index. A change reads the row
+with its version and swaps the entries whose value moved:
+
+```rust
+let mut batch = vec![
+    Op::Check {
+        key: row_key.clone(),
+        cond: Cond::Version(current.version),
+    },
+    Op::Put {
+        key: row_key.clone(),
+        value: self.schema.encode(&new[1..]),
+    },
+];
+for (before, after) in self.entries(&old).into_iter().zip(self.entries(&new)) {
+    if before != after {
+        batch.push(Op::Delete { key: before });
+        batch.push(Op::Put { key: after, value: Vec::new() });
+    }
+}
+```
+
+A lookup scans the entries for the value, then gets each row. It tests the row's value again, because
+the row can change between the two steps.
+
+=== What it costs and what it buys
+
+We load 200,000 rows with zero to three indices, then ask for one year with and without
+one:#footnote[The program is #repo("book/code/ch07/src/bin/index-times.rs"). Each time is the median
+of five runs, on a machine that was doing other work too, so only the rough ratios mean anything.]
+
+#output(title: "$ index-times DIR")[```
+200000 rows; each time is the median of 5 runs
+indices   insert (ns)    bytes/row
+0                4197           83
+1                6836          122
+2                7374          160
+3               10479          199
+
+WHERE year = 1982: 6667 rows
+  full scan    137.68ms
+  index         13.05ms
+```]
+
+Each index adds about 39 bytes to every row on disk, and three of them make an insert about two and
+a half times slower. In exchange, a query that returns one row in thirty runs about ten times faster.
+The gap grows with the table, since the scan reads every row and the index reads only the matches.
+
+=== Crashes and races
+
+Written as one `put` per key, a crash can leave a row without its entries. We insert one row with two
+indices, cut the log at every byte of the insert, reopen, and compare every row with every
+entry:#footnote[The programs are #repo("book/code/ch07/src/bin/index-crash.rs") and
+#repo("book/code/ch07/src/bin/index-race.rs").]
+
+#output(title: "$ index-crash DIR")[```
+                  cuts disagreements
+one put per key    191           112
+one batch          143             0
+```]
+
+A batch alone doesn't protect an update. Two threads changing the same row's year can both read the
+old value, both delete its entry, and each add their own. One row, two entries, and a query on the
+loser's year finds a row that doesn't have it. We run that 5,000 times:
+
+#output(title: "$ index-race DIR")[```
+                 rounds stale index rows
+no version check   5000             4958
+version check      5000                0
+```]
+
 == Inverted indices
 
 An _inverted index_ is the secondary index of a search engine, with many entries per record. Each
@@ -121,7 +205,19 @@ postings:  (word, doc_id) → ()
 Its operations work on postings rather than single keys. `rust AND bitcask` _intersects_ two
 postings — documents 12 and 40 — `OR` merges them, and a ranking orders the result. Each word's
 postings are one prefix of the index, in document order, so the intersection is an ordered walk over
-two prefixes at once.
+two prefixes at once. Here's one built over the 47 source files of yabiir 0.9.1, with one key per word
+and file:#footnote[The program is #repo("book/code/ch07/src/bin/inverted.rs"). A word is a run of
+at least three ASCII letters or digits, lower-cased.]
+
+#output(title: "$ inverted DIR crates/yabiir/src tombstone version")[```
+47 files, 1736 words, 8360 postings
+tombstone: 17 files
+version: 21 files
+tombstone AND version: 11 files, in 27 steps
+```]
+
+The walk takes 27 steps through two lists of 17 and 21, because both are in order and it never has
+to go back.
 
 == Other index structures
 
@@ -143,17 +239,17 @@ That's a secondary index: one more table, paid for on every write.
   [An atomic batch with a version check keeps a record and its index entries consistent, through
    crashes and concurrent writers.],
   [An inverted index is a secondary index with an entry per word; queries intersect its postings.],
+  [Measured: each index adds a write to every insert, and turns a scan into a read of the matches.],
 )
 
 #todo(
-  [Where index maintenance lives: declared in the table layer, or written by the application.],
-  [An index layer on `write_batch`: the record and its entries in one batch, updates guarded by
-   `Cond::Version`, measured against one `put` per key.],
-  [An inverted index built for real over the Bluesky firehose posts that `gulp` stores.],
+  [The planner choosing an index by itself, instead of a program calling it.],
 )
 // chapter-status:begin
 // stage: research-done
-// revision: 5
-// body: 09756ec2c862
+// revision: 6
+// body: e2eebc4841ce
 // activity: 2026-11-22 | r5 | stage | yabiir | note | migrated from Incipient; prose incomplete
+// activity: 2026-11-22 | r5 | stage | yabiir | note | research-done -> early-draft
+// activity: 2026-11-23 | r5 | stage | yabiir | note | author: chapters nobody has reviewed are research-complete
 // chapter-status:end

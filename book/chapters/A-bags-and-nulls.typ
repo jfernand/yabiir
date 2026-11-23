@@ -140,8 +140,9 @@ That's the case against bags and nulls: sets and values, as Codd first wrote the
   [Codd's "fatal flaws" in his own words, from the 1989 article.],
 )
 // chapter-status:begin
-// stage: early-draft
+// stage: research-done
 // revision: 1
 // body: 03f934794578
 // activity: 2026-11-22 | r1 | stage | yabiir | note | migrated from Incipient; text complete, not reviewed by the author
+// activity: 2026-11-23 | r1 | stage | yabiir | note | author: chapters nobody has reviewed are research-complete
 // chapter-status:end

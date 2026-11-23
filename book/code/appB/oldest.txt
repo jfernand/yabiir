@@ -1,0 +1,10 @@
+$ oldest DIR
+calculus     (apple-ii, 1977)
+difference   (apple-ii, 1977)
+
+Codd's reduction
+step 2  S1 = R, S2 = R                 5 and 5 tuples
+step 3  S = S1 x S2                    25 tuples
+step 4  T2 = S[2 <= 4]                 17 tuples
+step 5  T1 = T2[(1,2,3,4) / (1,2)]S2   1 tuple
+step 6  T = T1[1,2]                    (apple-ii, 1977)

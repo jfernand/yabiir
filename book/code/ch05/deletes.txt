@@ -21,8 +21,8 @@ deleted 1 row
 rows visited: 1
 
 $ dump-tail DIR 35
-6e bc 88 3a 0b 00 00 00 06 00 00 00 00 00 00 00  n..:............
-44 96 03 6b 01 00 00 00 03 00 00 80 00 00 00 00  D..k............
+c6 8d a8 e8 0b 00 00 00 06 00 00 00 00 00 00 00  ................
+aa b5 03 6b 01 00 00 00 03 00 00 80 00 00 00 00  ...k............
 63 36 34                                         c64
 (35 bytes)
 
@@ -108,7 +108,7 @@ one-batch         85    86   5, 1
 
 $ delete-race DIR
                    rounds  rows lost
-scan, then delete   20000       1581
+scan, then delete   20000       2126
 guarded batch       20000          0
 
 $ space DIR

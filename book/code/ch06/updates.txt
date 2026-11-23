@@ -1,0 +1,126 @@
+$ sql DIR "INSERT INTO store VALUES ('apple-ii', 'apple', 1977)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('ibm-pc', 'ibm', 1981)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('bbc-micro', 'acorn', 1981)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('zx-spectrum', 'sinclair', 1982)"
+inserted 1 row
+
+$ sql DIR "INSERT INTO store VALUES ('c64', 'commodore', 1982)"
+inserted 1 row
+
+$ sql DIR "UPDATE store SET maker = 'cbm' WHERE key = 'c64'"
+plan:
+  Update maker = 'cbm' (one batch)
+    Get 'c64' (get: one lookup)
+updated 1 row
+rows visited: 1
+
+$ sql DIR "SELECT * WHERE key = 'c64'"
+plan:
+  Get 'c64' (get: one lookup)
+ key | maker | year
+-----+-------+------
+ c64 | cbm   | 1982
+(1 row)
+rows visited: 1
+
+$ sql DIR "UPDATE store SET year = year + 1 WHERE year = 1981"
+plan:
+  Update year = year + 1 (one batch)
+    Filter year = 1981
+      FullScan (fold: every row)
+updated 2 rows
+rows visited: 5
+
+$ sql DIR "SELECT key, year WHERE year = 1982"
+plan:
+  Project key, year
+    Filter year = 1982
+      FullScan (fold: every row)
+ key         | year
+-------------+------
+ c64         | 1982
+ ibm-pc      | 1982
+ zx-spectrum | 1982
+ bbc-micro   | 1982
+(4 rows)
+rows visited: 5
+
+$ sql DIR "UPDATE store SET year = year + 1, maker = 'clive' WHERE key = 'zx-spectrum'"
+plan:
+  Update year = year + 1, maker = 'clive' (one batch)
+    Get 'zx-spectrum' (get: one lookup)
+updated 1 row
+rows visited: 1
+
+$ sql DIR "SELECT * WHERE key = 'zx-spectrum'"
+plan:
+  Get 'zx-spectrum' (get: one lookup)
+ key         | maker | year
+-------------+-------+------
+ zx-spectrum | clive | 1983
+(1 row)
+rows visited: 1
+
+$ sql DIR "UPDATE store SET year = 'soon'"
+error: year must be an integer; 'soon' isn't
+
+$ sql DIR "UPDATE store SET maker = maker + 1"
+error: maker must be an integer; maker + 1 isn't
+
+$ sql DIR "UPDATE store SET year = 1, year = 2"
+error: year is assigned twice
+
+$ sql DIR "UPDATE store SET key = 'c128' WHERE key = 'c64'"
+plan:
+  Update key = 'c128' (one batch)
+    Get 'c64' (get: one lookup)
+updated 1 row
+rows visited: 1
+
+$ sql DIR "SELECT * WHERE key = 'c128'"
+plan:
+  Get 'c128' (get: one lookup)
+ key  | maker | year
+------+-------+------
+ c128 | cbm   | 1982
+(1 row)
+rows visited: 1
+
+$ sql DIR "SELECT * WHERE key = 'c64'"
+plan:
+  Get 'c64' (get: one lookup)
+ key | maker | year
+-----+-------+------
+(0 rows)
+rows visited: 0
+
+$ sql DIR "UPDATE store SET key = 'ibm-pc' WHERE key = 'c128'"
+plan:
+  Update key = 'ibm-pc' (one batch)
+    Get 'c128' (get: one lookup)
+error: key 'ibm-pc' already exists
+
+$ sql DIR "UPDATE store SET key = 'same' WHERE year = 1982"
+plan:
+  Update key = 'same' (one batch)
+    Filter year = 1982
+      FullScan (fold: every row)
+error: key 'same' already exists
+
+$ update-race DIR
+8 threads, 2000 increments each
+                expected   added   lost  retries
+read, then put     16000    2071  13929        0
+UPDATE             16000   16000      0    14256
+
+$ move-crash DIR
+                 what a crash can leave
+delete, put      (no row), c128, c64
+put, delete      c128, c128 and c64, c64
+one batch        c128, c64

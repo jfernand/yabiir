@@ -1,0 +1,38 @@
+$ index-times DIR
+200000 rows; each time is the median of 5 runs
+indices   insert (ns)    bytes/row
+0                4197           83
+1                6836          122
+2                7374          160
+3               10479          199
+
+WHERE year = 1982: 6667 rows
+  full scan    137.68ms
+  index         13.05ms
+
+$ index-crash DIR
+                  cuts disagreements
+one put per key    191           112
+one batch          143             0
+
+$ index-race DIR
+                 rounds stale index rows
+no version check   5000             4958
+version check      5000                0
+
+$ inverted DIR crates/yabiir/src tombstone version
+47 files, 1736 words, 8360 postings
+tombstone: 17 files
+version: 21 files
+tombstone AND version: 11 files, in 27 steps
+  datafile/scan.rs
+  engine/tests/versions.rs
+  engine/write.rs
+  format/hint.rs
+  format/mod.rs
+  format/record.rs
+  merge/tests.rs
+  recovery/data.rs
+  recovery/hint.rs
+  recovery/mod.rs
+  writer.rs

@@ -260,8 +260,9 @@ first statement that writes.
   [yabiir's planner is rule-based; real planners compare estimated costs.],
 )
 // chapter-status:begin
-// stage: early-draft
+// stage: research-done
 // revision: 3
 // body: 20f60e890178
 // activity: 2026-11-22 | r3 | stage | yabiir | note | migrated from Incipient; text complete, not reviewed by the author
+// activity: 2026-11-23 | r3 | stage | yabiir | note | author: chapters nobody has reviewed are research-complete
 // chapter-status:end

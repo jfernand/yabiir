@@ -2,8 +2,8 @@
 
 = Algebra and Calculus <app-calculus>
 
-#status[Incipient. The definitions, one worked example in both languages, safety and Codd's
-theorem are in place; the translation from calculus to algebra is only sketched.]
+#status[Draft. The definitions, one worked example in both languages, safety, Codd's theorem and his
+reduction are in place, and the example is run for real against yabiir.]
 
 Codd gave the relational model two query languages: an _algebra_, which says how to compute an
 answer, and a _calculus_, which says what the answer is @codd1971 @codd1972. Both describe the same
@@ -61,7 +61,9 @@ two copies need different names, $s$ and $u$ (the rename operator ρ):
 
 $ "store" - pi_(s."key", s."value") (sigma_(s."value" > u."value") (rho_s ("store") times rho_u ("store"))) $
 
-Both return the Apple II, 1977. The calculus says what the oldest computer _is_; the algebra builds
+Both return the Apple II, 1977.#footnote[The program runs the formula, this expression and the
+reduction below over a real store: #repo("book/code/appB/src/main.rs"). Its output is in
+#repo("book/code/appB/oldest.txt").] The calculus says what the oldest computer _is_; the algebra builds
 the set of computers that aren't the oldest and throws them away. Codd included division ÷ in the
 algebra for this kind of query, so that "for all" has an operator of its own @codd1972.
 
@@ -113,6 +115,46 @@ the sequence what the user had meant @codd1972. Choosing how to fetch the data �
 order, which file first — had been the programmer's work. System R's optimizer, described by
 Patricia Selinger and her colleagues in 1979, made it the system's @selinger1979.
 
+== The reduction
+
+Codd's algorithm has seven steps, and it builds a large relation first and cuts it down: "a Cartesian
+product of these ranges is formed," then "the remaining product is whittled down by projection and
+division to satisfy the quantification" @codd1972. On the oldest computer, with $t$ as the first
+tuple variable and $u$ as the second, it goes like this. Codd addresses attributes by position, so
+in the product of two copies of `store`, 2 is $t$'s year and 4 is $u$'s.
+
++ *Normalize.* Move the quantifiers to the front and put the rest in disjunctive normal form. Our
+  formula is already in that form.
++ *Ranges.* Write a relation for each variable's range: $S_1 = R$ and $S_2 = R$, with $R$ the store.
++ *Product.* Form $S = S_1 times S_2$. A universally quantified variable ranges here over its whole
+  _universe_, the union of every relation compatible with its range, so that "for all" still works
+  when the range is empty. Our store has one relation, so that's $R$ again.
++ *Conditions.* Turn the formula without its quantifiers into a selection: $T_2 = S[2 <= 4]$.
++ *Quantifiers,* innermost first. An ∃ becomes a projection, and a ∀ becomes a division. Ours is a
+  ∀ over $S_2$: $T_1 = T_2[(1,2,3,4) div (1,2)] S_2$ keeps each $t$ that $T_2$ pairs with _every_
+  row of $S_2$.
++ *Target list.* Project what the query asked for: $T = T_1[1,2]$.
++ *Substitute* the equations into one another, for a single expression over the stored relations.
+
+Run on the five rows of the store, each step gives a relation we can count:
+
+#output(title: "$ oldest DIR")[```
+calculus     (apple-ii, 1977)
+difference   (apple-ii, 1977)
+
+Codd's reduction
+step 2  S1 = R, S2 = R                 5 and 5 tuples
+step 3  S = S1 x S2                    25 tuples
+step 4  T2 = S[2 <= 4]                 17 tuples
+step 5  T1 = T2[(1,2,3,4) / (1,2)]S2   1 tuple
+step 6  T = T1[1,2]                    (apple-ii, 1977)
+```]
+
+Of the 25 pairs, 17 have a first year no later than the second. Only the Apple II appears in the
+first position with all five rows in the second, so division leaves it alone. The reduction proves the
+theorem, and it's a slow way to run a query: it builds all 25 pairs to answer a question about five
+rows. Making that cheaper is what a query optimizer is for.
+
 == Where SQL sits
 
 SQL borrows from both. Its `SELECT … FROM … WHERE` names rows and states a condition on them, the way
@@ -120,9 +162,9 @@ the calculus does, and `EXISTS` is the calculus's ∃. Its `UNION` and `EXCEPT` 
 −. A database system that runs SQL turns the query into an algebra expression — a tree of operators —
 and then rewrites that tree into a cheaper one that returns the same answer.
 
-This book has no planner: every query in it is translated by hand. Each translation is the step a
-planner makes, from what the query says to an expression of operators, and from the operators to
-calls on yabiir's API.
+The planner of @ch-sql is a small case of that step: it goes from what a query says to a tree of
+operators, and from the operators to calls on yabiir's API, by fixed rules and without comparing
+costs.
 
 That's the difference: the calculus states the answer, and the algebra computes it.
 
@@ -134,17 +176,17 @@ That's the difference: the calculus states the answer, and the algebra computes 
   ["For all" is one quantifier in the calculus, and a difference (or a division) in the algebra.],
   [Only safe formulas are queries; every algebra expression is safe.],
   [Codd's theorem: the algebra and the safe calculus are equally expressive.],
+  [His reduction builds a product, selects, then turns each ∃ into a projection and each ∀ into a
+   division.],
   [Codd preferred the calculus: it states what the user wants, leaves storage to the system, and is
    the starting point for optimizing the retrieval.],
 )
 
-#todo(
-  [Codd's reduction, step by step, on the oldest-computer query.],
-  [The oldest-computer query run for real, as a hand translation against yabiir.],
-)
 // chapter-status:begin
 // stage: research-done
-// revision: 1
-// body: 93c55ab07a90
+// revision: 2
+// body: a169c726b7c9
 // activity: 2026-11-22 | r1 | stage | yabiir | note | migrated from Incipient; prose incomplete
+// activity: 2026-11-22 | r1 | stage | yabiir | note | research-done -> early-draft
+// activity: 2026-11-23 | r1 | stage | yabiir | note | author: chapters nobody has reviewed are research-complete
 // chapter-status:end

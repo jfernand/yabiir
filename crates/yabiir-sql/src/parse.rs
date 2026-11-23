@@ -39,6 +39,7 @@ pub(crate) enum Token {
     LeftParen,
     RightParen,
     Comma,
+    Plus,
     Integer(i64),
     String(Vec<u8>),
     End,
@@ -53,6 +54,7 @@ impl fmt::Display for Token {
             Token::LeftParen => f.write_str("'('"),
             Token::RightParen => f.write_str("')'"),
             Token::Comma => f.write_str("','"),
+            Token::Plus => f.write_str("'+'"),
             Token::Integer(n) => write!(f, "{n}"),
             Token::String(_) => f.write_str("a string"),
             Token::End => f.write_str("the end of the query"),
@@ -75,6 +77,10 @@ pub(crate) fn tokenize(text: &str) -> Result<Vec<(usize, Token)>, ParseError> {
             }
             b'=' => {
                 tokens.push((start, Token::Equals));
+                i += 1;
+            }
+            b'+' => {
+                tokens.push((start, Token::Plus));
                 i += 1;
             }
             b @ (b'(' | b')' | b',') => {

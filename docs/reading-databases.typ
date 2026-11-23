@@ -968,7 +968,7 @@ The rest is not in the engine, and every name in its sketches is a placeholder.
 
 Its headings are this report's order, not the book's chapters. The book follows its own plan
 (`book/PLAN.md`), one relational operator or piece of DML at a time, with writes woven into the
-relational chapters. That plan differs from this proposal in places: it brings in tables and
+relational chapters. That plan differs from this proposal in places: it brings in tables, a catalog and
 `FROM` for the set operators, and leaves `ORDER BY` and `LIMIT` out of scope.
 
 The constraints were: the schema is given at open time, queries are trees, and migrations are out
@@ -1089,8 +1089,9 @@ merge is what throws its history away.
 #dtable(
   columns: (auto, 1fr),
   ([Skipped], [Why the papers allow it]),
-  ([DDL and a catalog], [The schema is code at open time. DynamoDB's only "DDL" is a key schema at
-    creation, and it can't be altered.]),
+  ([`ALTER TABLE`], [DynamoDB's only "DDL" is a key schema at creation, and it can't be altered.
+    This report first proposed skipping the catalog too, with the schema as code at open time. The
+    book decided otherwise: see the note below.]),
   ([Migrations], [Only the key has a schema, and values describe themselves. Format changes keep
     old files readable and use merge as the rewrite, as format v2 does.]),
   ([General secondary indices], [A few explicit indices, as rows. Spanner shipped without
@@ -1101,6 +1102,13 @@ merge is what throws its history away.
   ([MVCC and long transactions], [DynamoDB's transactions are single-version and single-request
     by design.]),
 )
+
+#callout(kind: "info", "Decision, 2026-11-22: the book keeps a small catalog")[
+  With a second table, `FROM` has to resolve a name to a schema and to that table's rows, and a
+  schema held in code can misread another program's bytes. So _Append Only_ adds `CREATE TABLE` and
+  a catalog with its set operators, stored as one more table in the same store. It still skips
+  `ALTER TABLE` and migrations.
+]
 
 == And then
 

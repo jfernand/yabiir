@@ -82,7 +82,7 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 - σ on a non-key attribute is a full `fold` again. That's deliberate: it sets up step 10.
 - **Status:** Chapter 4, *Attributes and INSERT*, drafted (2026-11-21), with D1. `yabiir-sql`'s `table`
   module has the schema, the codec, the parser, the planner and `INSERT`; the schema is given by the
-  program, and a catalog waits for a second table.
+  program, and the catalog arrives with the second table (step 5).
 
 ### D1. `INSERT` — one tuple
 
@@ -117,8 +117,15 @@ Not an operator, but π and σ need it to mean anything beyond one value.
 
 - **What:** two relations with the same attributes (*union-compatible*), combined as sets. `UNION`,
   `INTERSECT`, `EXCEPT`.
-- **The step:** this is the first operator that needs **two relations**, so it's where *tables* and
-  `FROM` enter the book. Two stores, or one store with a table id in front of every key.
+- **The step:** this is the first operator that needs **two relations**, so it's where *tables*,
+  `FROM`, `CREATE TABLE` and the **catalog** enter the book.
+- **Tables:** one store, with a table id in front of every key.
+- **The catalog** *(author's decision, 2026-11-22)*: one more table in the same store, with a reserved
+  id, holding each table's name, id, attributes and domains. `FROM` resolves a name through it, and rows
+  are decoded with the schema it records, so a program can no longer bring the wrong one. The database
+  describes itself with its own tables (Rule 4 of Codd's 1985 twelve rules). `CREATE TABLE` is a
+  `write_batch`: `Cond::Absent` on the name, and a version check on the counter that hands out ids.
+  No `ALTER TABLE` and no migrations.
 - **yabiir needs:** two ordered scans, merged in one pass: union, intersection and difference of two
   sorted key streams are three variations of the same merge loop.
 - **Note:** `UNION` is the set operator. `UNION ALL` is SQL's bag version, and out of scope.
@@ -214,6 +221,6 @@ an extension, with grouping defined over sets so it doesn't smuggle bags back in
 | D1 | `INSERT` | `put`; insert-if-absent as `write_batch` with `Cond::Absent` (0.9) |
 | D2 | `DELETE` | `delete` |
 | D3 | `UPDATE` | read-modify-write: `get_versioned`, then `write_batch` with `Cond::Version` (0.9) |
-| 5 | `UNION` / `INTERSECT` / `EXCEPT` | tables (key prefix); merge of two scans |
+| 5 | `CREATE TABLE`, `UNION` / `INTERSECT` / `EXCEPT` | tables (key prefix); catalog as a table; merge of two scans |
 | 10 | faster σ on attributes | index tables, maintained in one `write_batch` with the record (0.9) |
 | 6–8 | ×, ⋈, ÷ | nothing new |

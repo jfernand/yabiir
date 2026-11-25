@@ -9,7 +9,13 @@
 #import "@preview/cetz:0.4.2"
 
 // ─── Tokens ────────────────────────────────────────────────────────────────
-#let c = (
+#let edition = sys.inputs.at("edition", default: "ebook")
+#assert(edition in ("ebook", "print"), message: "edition must be ebook or print")
+#let for-print = edition == "print"
+// The value for the ebook, or for the print edition.
+#let pv(ebook, print) = if for-print { print } else { ebook }
+
+#let _c-ebook = (
   black:     rgb("#0E0E0E"),
   ink:       rgb("#1A1A1A"),
   steel-900: rgb("#242424"),
@@ -39,6 +45,14 @@
   blue:      rgb("#0A4A7A"),
   blue-light: rgb("#1472C0"),
 )
+// Print: neutrals are black ink only (luma), so text and rules print from the black plate,
+// and paper is the white sheet. Colours keep their hue.
+#let c = if for-print { _c-ebook + (
+  black: luma(0), ink: luma(0), steel-900: luma(36), steel-800: luma(46), steel-700: luma(58),
+  steel-600: luma(74), steel-500: luma(102), steel-400: luma(136), steel-300: luma(170),
+  steel-200: luma(204), steel-100: luma(229), paper: luma(255), paper-dk: luma(229),
+  paper-dk2: luma(150), white: luma(255),
+) } else { _c-ebook }
 
 #let font-display = ("Barlow",)
 #let font-body    = ("Space Grotesk", "Hanken Grotesk")
@@ -64,7 +78,7 @@
 
 // Version tag: #since("0.6")  →  [yabiir 0.6+]
 #let since(v, suffix: "+") = box(baseline: 15%,
-  box(stroke: 0.75pt + c.amber-600, fill: c.amber-100, inset: (x: 3pt, y: 1.5pt), outset: (y: 0.5pt),
+  box(stroke: 0.75pt + c.amber-600, fill: pv(c.amber-100, none), inset: (x: 3pt, y: 1.5pt), outset: (y: 0.5pt),
     text(font: font-mono, size: 0.72em, weight: 600, fill: c.amber-txt)[yabiir #v#suffix]))
 
 // ─── Spread-aware placement for code ──────────────────────────────────────
@@ -73,10 +87,23 @@
 // facing odd (right) page; on an odd page it moves, whole, to the next (left) page.
 // A block taller than a page starts on a left page.
 //   make: breakable (bool) => the block to place
-#let page-h = 254mm
-#let page-margin-top = 22mm
-#let page-margin-bottom = 20mm
-#let text-width = 138mm
+// Print adds Lulu's 0.125 in bleed on every side of the 7 x 10 in trim.
+#let bleed = pv(0mm, 0.125in)
+#let page-w = pv(178mm, 7in + 2 * bleed)
+#let page-h = pv(254mm, 10in + 2 * bleed)
+#let page-margin-top = 22mm + bleed
+#let page-margin-bottom = 20mm + bleed
+// Print: Lulu's 0.5 in safety margin, plus its gutter for the page count on the spine side.
+// The page count comes from the build (`--input print-pages=N`); print-check sets it.
+#let print-pages = int(sys.inputs.at("print-pages", default: "0"))
+#assert(not for-print or print-pages > 0, message: "print edition needs --input print-pages=N")
+#let gutter = if print-pages > 600 { 0.75in } else if print-pages > 400 { 0.625in } else if print-pages > 150 { 0.5in } else if print-pages > 60 { 0.125in } else { 0in }
+#let page-margin-inside = pv(22mm, 0.5in + gutter + bleed)
+// Print keeps the ebook's 138 mm measure unless the gutter and the 0.5 in outside safety
+// margin leave less room. The extra 1 mm outside holds the hyphens and punctuation that
+// justified text hangs into the margin.
+#let text-width = pv(138mm, calc.min(138mm, 7in - 0.5in - gutter - 0.5in - 1mm))
+#let page-margin-outside = pv(18mm, 7in - 0.5in - gutter - text-width + bleed)
 // Invisible page markers inside each code block, so a layout check can query them:
 //   typst query databases.typ "<code-start>" --field value
 #let _code-mark(kind) = context [#metadata(here().page()) #label(kind)]
@@ -103,7 +130,7 @@
 
 #let _callout(label, accent, bg, body, title: none, breakable: false) = block(
   width: 100%, breakable: breakable, above: 1.2em, below: 1.2em,
-  stroke: (left: 3pt + accent), fill: bg, inset: (left: 12pt, right: 10pt, y: 9pt),
+  stroke: (left: 3pt + accent), fill: pv(bg, none), inset: (left: 12pt, right: 10pt, y: 9pt),
 )[
   #kicker(label, fill: accent.darken(15%), size: ts.xs + 0.6pt)
   #if title != none [ #h(4pt) #text(font: font-display, stretch: 75%, weight: 700,
@@ -142,12 +169,12 @@
 // Key-takeaways box (end of chapter)
 #let takeaways(..items) = block(
   width: 100%, above: 1.6em, below: 1.2em, breakable: false,
-  fill: c.ink, inset: 14pt,
+  fill: pv(c.ink, none), stroke: pv(none, 1pt + c.ink), inset: 14pt,
 )[
-  #set text(fill: c.paper, size: 0.95em)
-  #show raw.where(block: false): it => box(fill: c.steel-800, inset: (x: 2.5pt), outset: (y: 2.5pt),
-    text(font: font-mono, size: 7.8pt * 1.08, fill: c.amber-200, it.text))
-  #kicker("Key takeaways", fill: c.amber-400)
+  #set text(fill: pv(c.paper, c.ink), size: 0.95em)
+  #show raw.where(block: false): it => box(fill: pv(c.steel-800, none), inset: (x: 2.5pt), outset: (y: 2.5pt),
+    text(font: font-mono, size: 7.8pt * 1.08, fill: pv(c.amber-200, c.ink), it.text))
+  #kicker("Key takeaways", fill: pv(c.amber-400, c.amber-txt))
   #v(2pt)
   #set list(marker: text(fill: c.amber-400)[■], body-indent: 7pt)
   #for i in items.pos() [ - #i ]
@@ -156,9 +183,10 @@
 // Terminal / log output block (light variant of code)
 #let output(body, title: "output", size: 7.2pt, breakable: false) = block(
   width: 100%, above: 1em, below: 1em, breakable: breakable,
-  stroke: 0.75pt + c.paper-dk2, fill: c.white, inset: 0pt,
+  stroke: 0.75pt + c.paper-dk2, fill: pv(c.white, none), inset: 0pt,
 )[
-  #block(width: 100%, fill: c.paper-dk, inset: (x: 8pt, y: 3pt), below: 0pt,
+  #block(width: 100%, fill: pv(c.paper-dk, none), stroke: pv(none, (bottom: 0.5pt + c.paper-dk2)),
+    inset: (x: 8pt, y: 3pt), below: 0pt,
     kicker(title, fill: c.steel-600, size: ts.xs + 0.4pt))
   #show raw.where(block: true): r => block(width: 100%, text(font: font-mono, size: size, fill: c.steel-800, r.text))
   #set par(justify: false, leading: 0.5em)
@@ -291,8 +319,9 @@
 }
 
 #let syntax(diagram, title: "Syntax so far") = block(width: 100%, above: 1.1em, below: 1.1em,
-  breakable: false, stroke: 0.75pt + c.paper-dk2, fill: c.white, inset: 0pt)[
-  #block(width: 100%, fill: c.paper-dk, inset: (x: 8pt, y: 3pt), below: 0pt,
+  breakable: false, stroke: 0.75pt + c.paper-dk2, fill: pv(c.white, none), inset: 0pt)[
+  #block(width: 100%, fill: pv(c.paper-dk, none), stroke: pv(none, (bottom: 0.5pt + c.paper-dk2)),
+    inset: (x: 8pt, y: 3pt), below: 0pt,
     kicker(title, fill: c.steel-600, size: ts.xs + 0.4pt))
   #block(inset: (x: 10pt, y: 9pt), above: 0pt, width: 100%, align(center, layout(size => {
     let n = _rr-layout(diagram)
@@ -422,18 +451,19 @@
   let url = src-base + tag + "/" + root + path + "#L" + str(first) + "-L" + str(last)
   spread(brk => block(breakable: brk, above: 1.2em, below: 1.2em, width: 100%)[
     #_code-mark("code-start")
-    #block(width: 100%, below: 0pt, fill: c.black, stroke: (left: 3pt + c.amber-400),
+    #block(width: 100%, below: 0pt, fill: pv(c.black, none),
+      stroke: pv((left: 3pt + c.amber-400), (left: 3pt + c.amber-400, bottom: 0.5pt + c.paper-dk2)),
       inset: (left: 11pt, right: 9pt, y: 5pt),
       grid(columns: (1fr, auto), align: (left, right),
-        link(url, text(font: font-mono, size: 6.6pt, fill: c.amber-300, path)),
+        link(url, text(font: font-mono, size: 6.6pt, fill: pv(c.amber-300, c.amber-txt), path)),
         text(font: font-mono, size: 6.6pt, fill: c.steel-400,
           tag + " · L" + str(first) + "–" + str(last))))
     #{
       // own dark block (instead of the global raw style) so the file bar sits flush on top
       show raw.where(block: true): it => block(width: 100%, above: 0pt, breakable: true,
-        fill: c.ink, stroke: (left: 3pt + c.amber-400), inset: (left: 11pt, right: 9pt, top: 7pt, bottom: 9pt))[
+        fill: pv(c.ink, none), stroke: (left: 3pt + c.amber-400), inset: (left: 11pt, right: 9pt, top: 7pt, bottom: 9pt))[
         #set par(justify: false, leading: 0.55em)
-        #set text(font: font-mono, size: size, fill: c.paper)
+        #set text(font: font-mono, size: size, fill: pv(c.paper, c.ink))
         #it.lines.join(linebreak())
       ]
       show raw.line: it => {
@@ -499,21 +529,21 @@
 #let part(title, blurb: none, label: none) = {
   pagebreak(weak: true, to: "odd")
   part-counter.step()
-  page(fill: c.black, header: none, footer: none, margin: (x: 2.2cm, y: 2.6cm))[
+  page(fill: pv(c.black, none), header: none, footer: none, margin: (x: 2.2cm + bleed, y: 2.6cm + bleed))[
     #context {
       let n = part-counter.get().first()
       [#metadata((title: title, n: n)) <isss-part>]
       bookmark("Part " + numbering("I", n) + " · " + title)
       if label != none { [#metadata((title: title, n: n)) #label] }
       v(1fr)
-      kicker("Part " + numbering("I", n), fill: c.amber-400, size: ts.base)
+      kicker("Part " + numbering("I", n), fill: pv(c.amber-400, c.amber-txt), size: ts.base)
       v(6pt)
       line(length: 3cm, stroke: 4pt + c.amber-400)
       v(10pt)
-      par(leading: 0.15em, display(title, size: ts.x4, weight: 800, fill: c.paper, tracking: -0.01em))
+      par(leading: 0.15em, display(title, size: ts.x4, weight: 800, fill: pv(c.paper, c.ink), tracking: -0.01em))
       if blurb != none {
         v(14pt)
-        block(width: 80%, text(font: font-body, size: ts.md, fill: c.steel-300, blurb))
+        block(width: 80%, text(font: font-body, size: ts.md, fill: pv(c.steel-300, c.steel-600), blurb))
       }
       v(2fr)
       kicker("Industrial Strength Software Services", fill: c.steel-500, size: ts.xs + 0.6pt)
@@ -563,11 +593,12 @@
 
 // ─── Title page ────────────────────────────────────────────────────────────
 #let title-page(title: none, display-title: none, subtitle: none, author: none, credit: none, edition: none, band: none) = page(
-  fill: c.black, header: none, footer: none, margin: (x: 2.2cm, top: 2.4cm, bottom: 2cm),
+  fill: pv(c.black, none), header: none, footer: none,
+  margin: (x: 2.2cm + bleed, top: 2.4cm + bleed, bottom: 2cm + bleed),
 )[
-  #set text(fill: c.paper)
+  #set text(fill: pv(c.paper, c.ink))
   #grid(columns: (1fr, auto),
-    kicker("ISSS // Technical Series", fill: c.amber-400, size: ts.sm),
+    kicker("ISSS // Technical Series", fill: pv(c.amber-400, c.amber-txt), size: ts.sm),
     kicker(edition, fill: c.steel-400, size: ts.sm))
   #v(4pt)
   #line(length: 100%, stroke: 0.75pt + c.steel-700)
@@ -575,14 +606,14 @@
   #if band != none { block(width: 100%, fill: c.amber-400, inset: (x: 10pt, y: 6pt),
     kicker(band, fill: c.black, size: ts.sm)) }
   #v(14pt)
-  #par(leading: 0.1em, display(if display-title != none { display-title } else { title }, size: ts.x5 + 10pt, weight: 800, fill: c.paper, tracking: -0.02em))
+  #par(leading: 0.1em, display(if display-title != none { display-title } else { title }, size: ts.x5 + 10pt, weight: 800, fill: pv(c.paper, c.ink), tracking: -0.02em))
   #v(18pt)
-  #block(width: 85%, par(justify: false, text(size: ts.lg, fill: c.steel-300, subtitle)))
+  #block(width: 85%, par(justify: false, text(size: ts.lg, fill: pv(c.steel-300, c.steel-600), subtitle)))
   #v(2fr)
   #line(length: 100%, stroke: 0.75pt + c.steel-700)
   #v(4pt)
   #grid(columns: (1fr, auto),
-    kicker(if credit != none { credit } else { author }, fill: c.paper, size: ts.sm),
+    kicker(if credit != none { credit } else { author }, fill: pv(c.paper, c.ink), size: ts.sm),
     kicker("Technology before enshittification.", fill: c.steel-500, size: ts.sm))
 ]
 
@@ -591,9 +622,12 @@
   set document(title: title, author: if author != none { author } else { () })
 
   set page(
-    width: 178mm, height: 254mm,  // ~7 × 10 in technical book trim
-    fill: c.paper,
-    margin: (inside: 22mm, outside: 18mm, top: 22mm, bottom: 20mm),
+    width: page-w, height: page-h,  // ~7 × 10 in technical book trim; print adds bleed
+    fill: pv(c.paper, none),
+    margin: (inside: page-margin-inside, outside: page-margin-outside,
+      top: page-margin-top, bottom: page-margin-bottom),
+    // Print keeps the running head and folio inside Lulu's 0.5 in safety margin.
+    header-ascent: pv(30%, 4mm), footer-descent: pv(30%, 4mm),
     header: context {
       let here-pg = here().page()
       // suppress on chapter-opening pages
@@ -615,8 +649,9 @@
     footer: context {
       let pg = counter(page).display("1")
       let is-odd = calc.odd(here().page())
-      let num = box(fill: c.ink, inset: (x: 5pt, y: 2.5pt),
-        text(font: font-mono, size: ts.sm, weight: 600, fill: c.amber-400, pg))
+      let num = if for-print { text(font: font-mono, size: ts.sm, weight: 600, fill: c.ink, pg) }
+        else { box(fill: c.ink, inset: (x: 5pt, y: 2.5pt),
+          text(font: font-mono, size: ts.sm, weight: 600, fill: c.amber-400, pg)) }
       if is-odd { align(right, num) } else { align(left, num) }
     },
   )
@@ -633,7 +668,7 @@
   // Hanken Grotesk, already the body fallback, has one; emphasis uses it.
   show emph: set text(font: ("Hanken Grotesk",))
   show link: it => {
-    if type(it.dest) == str { text(fill: c.blue, it) } else { it }
+    if type(it.dest) == str { text(fill: pv(c.blue, c.ink), it) } else { it }
   }
   show ref: it => text(fill: c.amber-txt, weight: 600, it)
   set footnote.entry(separator: line(length: 25%, stroke: 0.5pt + c.steel-400))
@@ -714,13 +749,13 @@
     kicker(it.body, fill: c.ink, size: ts.sm))
 
   // Code ----------------------------------------------------------------
-  set raw(theme: "isss-dark.tmTheme")
+  set raw(theme: pv("isss-dark.tmTheme", "isss-print.tmTheme"))
   show raw: set text(font: font-mono)
   show raw.where(block: true): set text(size: 7.8pt)
   show raw.where(block: false): set text(size: 1.05em)   // Typst already scales raw to 0.8em; net ≈ 0.84em of surrounding text (body, footnotes, tables)
   show raw.where(block: true): it => spread(brk => block(
     width: 100%, above: 1em, below: 1.1em, breakable: brk,
-    fill: c.ink, stroke: (left: 3pt + c.amber-400),
+    fill: pv(c.ink, none), stroke: (left: 3pt + c.amber-400),
     inset: (left: 11pt, right: 9pt, y: 9pt),
   )[
     #if it.lang != none {
@@ -729,24 +764,25 @@
     }
     #_code-mark("code-start")
     #set par(justify: false, leading: 0.55em)
-    #set text(fill: c.paper)
+    #set text(fill: pv(c.paper, c.ink))
     #it
     #_code-mark("code-end")
   ])
   show raw.where(block: false): it => box(
-    fill: c.paper-dk, inset: (x: 2.5pt), outset: (y: 2.5pt),
+    fill: pv(c.paper-dk, none), inset: (x: 2.5pt), outset: (y: 2.5pt),
     text(fill: c.ink, it),
   )
 
   // Tables --------------------------------------------------------------
   set table(
-    stroke: (x, y) => (bottom: 0.5pt + c.paper-dk2, top: if y == 0 { 1.5pt + c.ink }),
+    stroke: (x, y) => (bottom: if for-print and y == 0 { 1pt + c.ink } else { 0.5pt + c.paper-dk2 },
+      top: if y == 0 { 1.5pt + c.ink }),
     inset: (x: 6pt, y: 5pt),
     align: left,
-    fill: (x, y) => if y == 0 { c.ink },
+    fill: (x, y) => if y == 0 and not for-print { c.ink },
   )
   show table.cell.where(y: 0): set text(font: font-display, stretch: 75%, weight: 700,
-    size: ts.base, fill: c.amber-400, tracking: 0.06em)
+    size: ts.base, fill: pv(c.amber-400, c.ink), tracking: 0.06em)
   show table.cell.where(y: 0): it => upper(it)
   show table: set text(size: ts.sm + 1pt)
   show table: set par(justify: false)

@@ -50,10 +50,10 @@
 #let c = if for-print { _c-ebook + (
   black: luma(0), ink: luma(0), steel-900: luma(36), steel-800: luma(46), steel-700: luma(58),
   steel-600: luma(74), steel-500: luma(102), steel-400: luma(136), steel-300: luma(170),
-  steel-200: luma(204), steel-100: luma(204), paper: luma(255), paper-dk: luma(204),
+  steel-200: luma(185), steel-100: luma(204), paper: luma(255), paper-dk: luma(204),
   paper-dk2: luma(150), white: luma(255),
-  // Lulu's Standard Color prints tints under 20% unevenly: the lightest amber moves up a step.
-  amber-100: _c-ebook.amber-200,
+  // Lulu's Standard Color prints tints under 20% unevenly: the lightest amber becomes a 30% tint.
+  amber-100: rgb("#FFEDB3"),
 ) } else { _c-ebook }
 
 #let font-display = ("Barlow",)

@@ -1,38 +1,162 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- ISSS Print: code on white paper for Lulu Standard Color. Dark, saturated hues only, so no
-     token prints as a weak tint; black is pure black. -->
 <plist version="1.0">
 <dict>
-  <key>name</key><string>ISSS Print</string>
-  <key>settings</key>
-  <array>
-    <dict><key>settings</key><dict>
-      <key>background</key><string>#FFFFFF</string>
-      <key>foreground</key><string>#000000</string>
-    </dict></dict>
-    <dict><key>scope</key><string>comment, punctuation.definition.comment</string>
-      <key>settings</key><dict><key>foreground</key><string>#5A5A5A</string><key>fontStyle</key><string>italic</string></dict></dict>
-    <dict><key>scope</key><string>keyword, storage, storage.type, storage.modifier, keyword.control, keyword.operator.new</string>
-      <key>settings</key><dict><key>foreground</key><string>#8A5E00</string><key>fontStyle</key><string>bold</string></dict></dict>
-    <dict><key>scope</key><string>string, string.quoted</string>
-      <key>settings</key><dict><key>foreground</key><string>#1A7A3C</string></dict></dict>
-    <dict><key>scope</key><string>constant.numeric, constant.language, constant.character</string>
-      <key>settings</key><dict><key>foreground</key><string>#0A4A7A</string></dict></dict>
-    <dict><key>scope</key><string>entity.name.function, support.function, meta.function-call</string>
-      <key>settings</key><dict><key>foreground</key><string>#000000</string><key>fontStyle</key><string>bold</string></dict></dict>
-    <dict><key>scope</key><string>entity.name.type, entity.name.class, support.class, support.type, storage.type.java</string>
-      <key>settings</key><dict><key>foreground</key><string>#0A4A7A</string></dict></dict>
-    <dict><key>scope</key><string>variable.parameter, variable.other</string>
-      <key>settings</key><dict><key>foreground</key><string>#000000</string></dict></dict>
-    <dict><key>scope</key><string>storage.type.annotation, punctuation.definition.annotation, meta.annotation</string>
-      <key>settings</key><dict><key>foreground</key><string>#8A5E00</string></dict></dict>
-    <dict><key>scope</key><string>punctuation, keyword.operator</string>
-      <key>settings</key><dict><key>foreground</key><string>#3A3A3A</string></dict></dict>
-    <dict><key>scope</key><string>markup.inserted</string>
-      <key>settings</key><dict><key>foreground</key><string>#1A7A3C</string></dict></dict>
-    <dict><key>scope</key><string>markup.deleted</string>
-      <key>settings</key><dict><key>foreground</key><string>#CC2200</string></dict></dict>
-  </array>
+	<key>name</key>
+	<string>ISSS Print</string>
+	<key>settings</key>
+	<array>
+		<dict>
+			<key>settings</key>
+			<dict>
+				<key>background</key>
+				<string>#FFFFFF</string>
+				<key>foreground</key>
+				<string>#000000</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>comment, punctuation.definition.comment</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>italic</string>
+				<key>foreground</key>
+				<string>#5A5A5A</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>keyword, storage, storage.type, storage.modifier, keyword.control, keyword.operator.new</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>bold</string>
+				<key>foreground</key>
+				<string>#8A5E00</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>string, string.quoted</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#1A7A3C</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>constant.numeric, constant.language, constant.character</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#B0421A</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>entity.name.function, support.function, meta.function-call</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>bold</string>
+				<key>foreground</key>
+				<string>#0E5F6B</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>entity.name.type, entity.name.class, support.class, support.type, storage.type.java</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#0A4A7A</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>variable.parameter, variable.other</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#2B3A55</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>storage.type.annotation, punctuation.definition.annotation, meta.annotation</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>italic</string>
+				<key>foreground</key>
+				<string>#8A5E00</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>punctuation, keyword.operator</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#3A3A3A</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>markup.inserted</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#1A7A3C</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>markup.deleted</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#CC2200</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Macros</string>
+			<key>scope</key>
+			<string>entity.name.function.macro, support.macro, meta.macro</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#8E1F6E</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Language variables</string>
+			<key>scope</key>
+			<string>variable.language, storage.modifier.lifetime</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>italic</string>
+				<key>foreground</key>
+				<string>#0E5F6B</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Escapes</string>
+			<key>scope</key>
+			<string>constant.character.escape, string.regexp</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#B0421A</string>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

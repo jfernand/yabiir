@@ -46,12 +46,14 @@
   blue-light: rgb("#1472C0"),
 )
 // Print: neutrals are black ink only (luma), so text and rules print from the black plate,
-// and paper is the white sheet. Colours keep their hue.
+// and paper is the white sheet. Colours keep their hue. No fill is lighter than a 20% tint.
 #let c = if for-print { _c-ebook + (
   black: luma(0), ink: luma(0), steel-900: luma(36), steel-800: luma(46), steel-700: luma(58),
   steel-600: luma(74), steel-500: luma(102), steel-400: luma(136), steel-300: luma(170),
-  steel-200: luma(204), steel-100: luma(229), paper: luma(255), paper-dk: luma(229),
+  steel-200: luma(204), steel-100: luma(204), paper: luma(255), paper-dk: luma(204),
   paper-dk2: luma(150), white: luma(255),
+  // Lulu's Standard Color prints tints under 20% unevenly: the lightest amber moves up a step.
+  amber-100: _c-ebook.amber-200,
 ) } else { _c-ebook }
 
 #let font-display = ("Barlow",)
